@@ -296,10 +296,16 @@ func (dm *KubeArmorDaemon) ParseAndUpdateContainerSecurityPolicy(event tp.K8sKub
 		secPolicy.Spec.Action = "Allow"
 	case "audit":
 		secPolicy.Spec.Action = "Audit"
+	case "batchaudit":
+		secPolicy.Spec.Action = "BatchAudit"
 	case "block":
 		secPolicy.Spec.Action = "Block"
 	case "":
 		secPolicy.Spec.Action = "Block" // by default
+	}
+
+	if secPolicy.Spec.Action == "BatchAudit" && secPolicy.Spec.BatchAudit.IntervalSeconds <= 0 {
+		secPolicy.Spec.BatchAudit.IntervalSeconds = tp.DefaultBatchAuditIntervalSeconds
 	}
 
 	// add identities
@@ -336,6 +342,8 @@ func (dm *KubeArmorDaemon) ParseAndUpdateContainerSecurityPolicy(event tp.K8sKub
 	slices.Sort(secPolicy.Spec.Selector.Identities)
 
 	// add severities, tags, messages, and actions
+
+	unsupportedBatchAuditCapabilities := false
 
 	if len(secPolicy.Spec.Process.MatchPaths) > 0 {
 		for idx, path := range secPolicy.Spec.Process.MatchPaths {
@@ -622,7 +630,16 @@ func (dm *KubeArmorDaemon) ParseAndUpdateContainerSecurityPolicy(event tp.K8sKub
 					secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action = secPolicy.Spec.Action
 				}
 			}
+
+			if secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action == "BatchAudit" {
+				secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action = "Audit"
+				unsupportedBatchAuditCapabilities = true
+			}
 		}
+	}
+
+	if unsupportedBatchAuditCapabilities {
+		dm.Logger.Warnf("BatchAudit is not supported for capabilities in policy %s; using Audit", secPolicy.Metadata["policyName"])
 	}
 
 	// handle updates to global policy store

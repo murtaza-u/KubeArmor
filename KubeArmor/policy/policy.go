@@ -34,16 +34,12 @@ func (p *PolicyServer) ContainerPolicy(c context.Context, data *pb.Policy) (*pb.
 	err := json.Unmarshal(data.Policy, &policyEvent)
 
 	if err == nil {
-
 		if policyEvent.Object.Metadata.Name != "" {
-
 			res.Status = p.UpdateContainerPolicy(policyEvent)
-
 		} else {
 			res.Status = pb.PolicyStatus_Invalid
 			kg.Warn("Empty Container Policy Event")
 		}
-
 	} else {
 
 		kg.Warn("Invalid Container Policy Event")
@@ -66,11 +62,8 @@ func (p *PolicyServer) HostPolicy(c context.Context, data *pb.Policy) (*pb.Respo
 
 	err := json.Unmarshal(data.Policy, &policyEvent)
 	if err == nil {
-
 		if policyEvent.Object.Metadata.Name != "" {
-
 			res.Status = p.UpdateHostPolicy(policyEvent)
-
 		} else {
 
 			kg.Warn("Empty Host Policy Event")
@@ -78,7 +71,6 @@ func (p *PolicyServer) HostPolicy(c context.Context, data *pb.Policy) (*pb.Respo
 			res.Status = pb.PolicyStatus_Invalid
 
 		}
-
 	} else {
 		kg.Warn("Invalid Host Policy Event")
 		res.Status = pb.PolicyStatus_Invalid

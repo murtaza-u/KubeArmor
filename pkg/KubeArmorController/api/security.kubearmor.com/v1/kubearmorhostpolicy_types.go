@@ -20,6 +20,8 @@ type KubeArmorHostPolicySpec struct {
 
 	AppArmor string `json:"apparmor,omitempty"`
 
+	BatchAudit BatchAuditType `json:"batchAudit,omitempty"`
+
 	// +kubebuilder:validation:optional
 	Severity SeverityType `json:"severity,omitempty"`
 	// +kubebuilder:validation:optional

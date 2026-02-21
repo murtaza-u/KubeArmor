@@ -386,12 +386,47 @@ func (fd *Feeder) newMatchPolicy(policyEnabled int, policyName, src string, mp a
 	return match
 }
 
+func minBatchAuditIntervalForPolicies(policies []tp.SecurityPolicy) int32 {
+	minInterval := int32(0)
+	for _, secPolicy := range policies {
+		if secPolicy.Spec.Action != "BatchAudit" {
+			continue
+		}
+		interval := secPolicy.Spec.BatchAudit.IntervalSeconds
+		if interval <= 0 {
+			interval = tp.DefaultBatchAuditIntervalSeconds
+		}
+		if minInterval == 0 || interval < minInterval {
+			minInterval = interval
+		}
+	}
+	return minInterval
+}
+
+func minBatchAuditIntervalForHostPolicies(policies []tp.HostSecurityPolicy) int32 {
+	minInterval := int32(0)
+	for _, secPolicy := range policies {
+		if secPolicy.Spec.Action != "BatchAudit" {
+			continue
+		}
+		interval := secPolicy.Spec.BatchAudit.IntervalSeconds
+		if interval <= 0 {
+			interval = tp.DefaultBatchAuditIntervalSeconds
+		}
+		if minInterval == 0 || interval < minInterval {
+			minInterval = interval
+		}
+	}
+	return minInterval
+}
+
 // UpdateSecurityPolicies Function
 func (fd *Feeder) UpdateSecurityPolicies(action string, endPoint tp.EndPoint) {
 	name := endPoint.NamespaceName + "_" + endPoint.EndPointName
 
 	if action == "DELETED" {
 		delete(fd.SecurityPolicies, name)
+		fd.updateBatchAuditInterval(name, 0, action)
 	}
 
 	// ADDED | MODIFIED
@@ -705,6 +740,13 @@ func (fd *Feeder) UpdateSecurityPolicies(action string, endPoint tp.EndPoint) {
 	fd.SecurityPoliciesLock.Lock()
 	fd.SecurityPolicies[name] = matches
 	fd.SecurityPoliciesLock.Unlock()
+
+	if action != "DELETED" {
+		interval := minBatchAuditIntervalForPolicies(endPoint.SecurityPolicies)
+		fd.updateBatchAuditInterval(name, interval, action)
+	}
+
+	fd.UpdateBatchAuditPoliciesForEndpoint(action, endPoint)
 }
 
 // ============================ //
@@ -715,6 +757,8 @@ func (fd *Feeder) UpdateSecurityPolicies(action string, endPoint tp.EndPoint) {
 func (fd *Feeder) UpdateHostSecurityPolicies(action string, secPolicies []tp.HostSecurityPolicy) {
 	if action == "DELETED" {
 		delete(fd.SecurityPolicies, fd.Node.NodeName)
+		fd.updateBatchAuditInterval(fd.Node.NodeName, 0, action)
+		fd.UpdateBatchAuditPoliciesForHost(action, secPolicies)
 		return
 	}
 
@@ -1041,6 +1085,11 @@ func (fd *Feeder) UpdateHostSecurityPolicies(action string, secPolicies []tp.Hos
 	fd.SecurityPoliciesLock.Lock()
 	fd.SecurityPolicies[fd.Node.NodeName] = matches
 	fd.SecurityPoliciesLock.Unlock()
+
+	interval := minBatchAuditIntervalForHostPolicies(secPolicies)
+	fd.updateBatchAuditInterval(fd.Node.NodeName, interval, action)
+
+	fd.UpdateBatchAuditPoliciesForHost(action, secPolicies)
 }
 
 // ===================== //
@@ -1049,7 +1098,6 @@ func (fd *Feeder) UpdateHostSecurityPolicies(action string, secPolicies []tp.Hos
 
 // UpdateDefaultPosture Function
 func (fd *Feeder) UpdateDefaultPosture(action string, namespace string, defaultPosture tp.DefaultPosture) {
-
 	fd.DefaultPosturesLock.Lock()
 	defer fd.DefaultPosturesLock.Unlock()
 
@@ -1068,6 +1116,10 @@ func matchResources(secPolicy tp.MatchPolicy, log tp.Log) bool {
 	firstLogResourceDir := getDirectoryPart(firstLogResource)
 	firstLogResourceDirCount := strings.Count(firstLogResourceDir, "/")
 	procDirCount := strings.Count(getDirectoryPart(log.ProcessName), "/")
+	secDir := secPolicy.Resource
+	if secPolicy.ResourceType == "Directory" && secDir != "/" {
+		secDir = strings.TrimRight(secDir, "/")
+	}
 
 	if secPolicy.Operation == "File" {
 		if secPolicy.ResourceType == "Path" && secPolicy.Resource == firstLogResource {
@@ -1075,11 +1127,11 @@ func matchResources(secPolicy tp.MatchPolicy, log tp.Log) bool {
 		}
 
 		// check if the log's resource directory starts with the policy's resource directory
-		if secPolicy.ResourceType == "Directory" && (strings.HasPrefix(firstLogResourceDir, secPolicy.Resource) &&
+		if secPolicy.ResourceType == "Directory" && (strings.HasPrefix(firstLogResourceDir, secDir) &&
 			// for non-recursive rule - check if the directory depth of the log matches the policy resource's depth
-			((!secPolicy.Recursive && firstLogResourceDirCount == strings.Count(secPolicy.Resource, "/")) ||
+			((!secPolicy.Recursive && firstLogResourceDirCount == strings.Count(secDir, "/")) ||
 				// for recursive rule - check the log's directory is at the same or deeper level than the policy's resource
-				(secPolicy.Recursive && firstLogResourceDirCount >= strings.Count(secPolicy.Resource, "/")))) ||
+				(secPolicy.Recursive && firstLogResourceDirCount >= strings.Count(secDir, "/")))) ||
 			// exact matching - check if the policy's resource is exactly the logged resource with a trailing slash
 			(secPolicy.Resource == (log.Resource + "/")) ||
 			// match if the policy is recursive and applies to the root directory
@@ -1092,14 +1144,21 @@ func matchResources(secPolicy tp.MatchPolicy, log tp.Log) bool {
 		if secPolicy.ResourceType == "Path" && secPolicy.Resource == log.ProcessName {
 			return true
 		}
-		if secPolicy.ResourceType == "Directory" && strings.HasPrefix(getDirectoryPart(log.ProcessName), secPolicy.Resource) &&
-			((!secPolicy.Recursive && procDirCount == strings.Count(secPolicy.Resource, "/")) ||
-				(secPolicy.Recursive && procDirCount >= strings.Count(secPolicy.Resource, "/"))) {
+		if secPolicy.ResourceType == "Path" && secPolicy.Resource == firstLogResource {
+			return true
+		}
+		if secPolicy.ResourceType == "Directory" && strings.HasPrefix(getDirectoryPart(log.ProcessName), secDir) &&
+			((!secPolicy.Recursive && procDirCount == strings.Count(secDir, "/")) ||
+				(secPolicy.Recursive && procDirCount >= strings.Count(secDir, "/"))) {
+			return true
+		}
+		if secPolicy.ResourceType == "Directory" && strings.HasPrefix(firstLogResourceDir, secDir) &&
+			((!secPolicy.Recursive && firstLogResourceDirCount == strings.Count(secDir, "/")) ||
+				(secPolicy.Recursive && firstLogResourceDirCount >= strings.Count(secDir, "/"))) {
 			return true
 		}
 	}
 	return false
-
 }
 
 // matchDeviceResource Function
@@ -1230,6 +1289,17 @@ func setLogFields(log *tp.Log, existAllowPolicy bool, defaultPosture string, vis
 	return visibility
 }
 
+func isAuditAction(action string) bool {
+	return action == "Audit" || action == "BatchAudit"
+}
+
+func auditActionValue(action string) string {
+	if action == "BatchAudit" {
+		return "BatchAudit"
+	}
+	return "Audit"
+}
+
 // ==================== //
 // == Policy Matches == //
 // ==================== //
@@ -1352,7 +1422,7 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 						if matchedFlags && (secPolicy.Action == "Allow" || secPolicy.Action == "Audit (Allow)") && log.Result == "Passed" {
 							// allow policy or allow policy with audit mode
 							// matched source + matched resource + matched flags + matched action + expected result -> going to be skipped
-							if log.Action == "Audit" {
+							if isAuditAction(log.Action) {
 								// could be a case of lenient whitelist policy
 								continue
 							}
@@ -1381,7 +1451,7 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 							continue
 						}
 
-						if matchedFlags && secPolicy.Action == "Audit" && log.Result == "Passed" {
+						if matchedFlags && isAuditAction(secPolicy.Action) && log.Result == "Passed" {
 							// audit policy
 							// matched source + matched resource + matched flags + matched action + expected result -> alert (audit log)
 
@@ -1400,7 +1470,7 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 							}
 
 							log.Enforcer = "eBPF Monitor"
-							log.Action = secPolicy.Action
+							log.Action = auditActionValue(secPolicy.Action)
 
 							skip = true
 							continue
@@ -1567,7 +1637,7 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 							continue
 						}
 
-						if secPolicy.Action == "Audit" && log.Result == "Passed" {
+						if isAuditAction(secPolicy.Action) && log.Result == "Passed" {
 							// audit policy
 							// matched source + matched resource + matched action + expected result -> alert (audit log)
 
@@ -1586,7 +1656,7 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 							}
 
 							log.Enforcer = "eBPF Monitor"
-							log.Action = secPolicy.Action
+							log.Action = auditActionValue(secPolicy.Action)
 
 							skip = true
 							continue
@@ -1979,9 +2049,9 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 				if secPolicy.Operation != log.Operation {
 					continue
 				}
-				//Get syscall
+				// Get syscall
 				syscallName := strings.Split(strings.Split(log.Data, " ")[0], "SYS_")[1]
-				//Get syscall Source
+				// Get syscall Source
 				syscallSource := strings.Split(log.Source, " ")[0]
 				matchedRule := false
 				if syscallName == secPolicy.ResourceType {
@@ -1995,7 +2065,7 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 					}
 
 					if len(secPolicy.Resource) > 0 &&
-						((secPolicy.Resource[len(secPolicy.Resource)-1] == '/' && ((strings.HasPrefix(log.Resource, secPolicy.Resource) && secPolicy.ReadOnly) || secPolicy.Resource[:len(secPolicy.Resource)-1] == log.Resource)) || //match dir
+						((secPolicy.Resource[len(secPolicy.Resource)-1] == '/' && ((strings.HasPrefix(log.Resource, secPolicy.Resource) && secPolicy.ReadOnly) || secPolicy.Resource[:len(secPolicy.Resource)-1] == log.Resource)) || // match dir
 							secPolicy.Resource == log.Resource) { // match path
 						matchPath = true
 					}

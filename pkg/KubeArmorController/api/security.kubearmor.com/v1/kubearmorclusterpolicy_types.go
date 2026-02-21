@@ -33,6 +33,9 @@ type KubeArmorClusterPolicySpec struct {
 
 	AppArmor string       `json:"apparmor,omitempty"`
 	Presets  []PresetType `json:"presets,omitempty"`
+
+	BatchAudit BatchAuditType `json:"batchAudit,omitempty"`
+
 	// +kubebuilder:validation:optional
 	Severity SeverityType `json:"severity,omitempty"`
 	// +kubebuilder:validation:optional

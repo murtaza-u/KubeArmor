@@ -301,6 +301,12 @@ type Log struct {
 	FileVisibilityEnabled         bool `json:"fileVisibilityEnabled,omitempty"`
 	NetworkVisibilityEnabled      bool `json:"networkVisibilityEnabled,omitempty"`
 	CapabilitiesVisibilityEnabled bool `json:"capabilitiesVisibilityEnabled,omitempty"`
+
+	RawData         []byte `json:"-"`
+	RawData2        []byte `json:"-"`
+	BatchAuditFlush bool   `json:"-"`
+	PolicyHash      uint64 `json:"-"`
+	PolicyMatched   bool   `json:"-"`
 }
 
 // MatchPolicy Structure
@@ -341,6 +347,9 @@ const (
 	KubeArmorPolicyDisabled = 0
 	KubeArmorPolicyEnabled  = 1
 	KubeArmorPolicyAudited  = 2
+
+	DefaultBatchAuditIntervalSeconds int32 = 60
+	BatchAuditMaxBufferSize                = 32768
 )
 
 // MatchExpressionType Structure
@@ -386,6 +395,48 @@ type ProcessPathType struct {
 	Tags     []string `json:"tags,omitempty"`
 	Message  string   `json:"message,omitempty"`
 	Action   string   `json:"action,omitempty"`
+}
+
+// BatchAuditType Structure
+type BatchAuditType struct {
+	IntervalSeconds int32 `json:"intervalSeconds,omitempty"`
+}
+
+type BatchAuditKey struct {
+	PolicyHash uint64
+	EventHash  uint64
+	Ts         uint64
+}
+
+type BatchAuditVal struct {
+	Size uint32
+	Data [BatchAuditMaxBufferSize]byte
+}
+
+type BatchAuditRuleKey struct {
+	Path   [200]byte
+	Source [200]byte
+}
+
+type BatchAuditRuleVal struct {
+	PolicyHash  uint64
+	ProcessMask uint16
+	FileMask    uint16
+	Pad         uint32
+}
+
+type BatchAuditAggKey struct {
+	PolicyHash uint64
+	EventHash  uint64
+}
+
+type BatchAuditAggVal struct {
+	Count       uint64
+	FirstTs     uint64
+	LastTs      uint64
+	SampleSize  uint32
+	Sample2Size uint32
+	SampleData  [BatchAuditMaxBufferSize]byte
 }
 
 // ProcessDirectoryType Structure
@@ -614,6 +665,8 @@ type SecuritySpec struct {
 
 	AppArmor string `json:"apparmor,omitempty"`
 
+	BatchAudit BatchAuditType `json:"batchAudit,omitempty"`
+
 	Severity int      `json:"severity,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
 	Message  string   `json:"message,omitempty"`
@@ -648,6 +701,8 @@ type HostSecuritySpec struct {
 	Device       DeviceType       `json:"device,omitempty"`
 
 	AppArmor string `json:"apparmor,omitempty"`
+
+	BatchAudit BatchAuditType `json:"batchAudit,omitempty"`
 
 	Severity int      `json:"severity,omitempty"`
 	Tags     []string `json:"tags,omitempty"`

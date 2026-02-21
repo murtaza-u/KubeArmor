@@ -291,6 +291,10 @@ func (dm *KubeArmorDaemon) InitSystemMonitor() error {
 		return fmt.Errorf("failed to initialize BPF: %w", err)
 	}
 
+	if dm.Logger != nil {
+		dm.Logger.SetBatchAuditIntervalHook(dm.SystemMonitor.UpdateBatchAuditInterval)
+	}
+
 	return nil
 }
 

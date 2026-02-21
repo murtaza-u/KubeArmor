@@ -1397,13 +1397,21 @@ func (dm *KubeArmorDaemon) CreateSecurityPolicy(policyType string, securityPolic
 		secPolicy.Spec.Action = "Allow"
 	case "audit":
 		secPolicy.Spec.Action = "Audit"
+	case "batchaudit":
+		secPolicy.Spec.Action = "BatchAudit"
 	case "block":
 		secPolicy.Spec.Action = "Block"
 	case "":
 		secPolicy.Spec.Action = "Block" // by default
 	}
 
+	if secPolicy.Spec.Action == "BatchAudit" && secPolicy.Spec.BatchAudit.IntervalSeconds <= 0 {
+		secPolicy.Spec.BatchAudit.IntervalSeconds = tp.DefaultBatchAuditIntervalSeconds
+	}
+
 	// add severities, tags, messages, and actions
+
+	unsupportedBatchAuditCapabilities := false
 
 	if len(secPolicy.Spec.Process.MatchPaths) > 0 {
 		for idx, path := range secPolicy.Spec.Process.MatchPaths {
@@ -1690,7 +1698,16 @@ func (dm *KubeArmorDaemon) CreateSecurityPolicy(policyType string, securityPolic
 					secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action = secPolicy.Spec.Action
 				}
 			}
+
+			if secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action == "BatchAudit" {
+				secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action = "Audit"
+				unsupportedBatchAuditCapabilities = true
+			}
 		}
+	}
+
+	if unsupportedBatchAuditCapabilities {
+		dm.Logger.Warnf("BatchAudit is not supported for capabilities in policy %s/%s; using Audit", namespace, name)
 	}
 
 	if len(secPolicy.Spec.Syscalls.MatchSyscalls) > 0 {
@@ -1748,6 +1765,15 @@ func (dm *KubeArmorDaemon) CreateSecurityPolicy(policyType string, securityPolic
 				}
 			}
 
+		}
+	}
+
+	if secPolicy.Spec.Action == "BatchAudit" && (len(secPolicy.Spec.Syscalls.MatchSyscalls) > 0 || len(secPolicy.Spec.Syscalls.MatchPaths) > 0) {
+		secPolicy.Spec.Action = "Audit"
+		if namespace == "" {
+			dm.Logger.Warnf("BatchAudit is not supported for syscalls in cluster policy %s; using Audit", name)
+		} else {
+			dm.Logger.Warnf("BatchAudit is not supported for syscalls in policy %s/%s; using Audit", namespace, name)
 		}
 	}
 	return
@@ -2024,10 +2050,16 @@ func (dm *KubeArmorDaemon) ParseAndUpdateHostSecurityPolicy(event tp.K8sKubeArmo
 		secPolicy.Spec.Action = "Allow"
 	case "audit":
 		secPolicy.Spec.Action = "Audit"
+	case "batchaudit":
+		secPolicy.Spec.Action = "BatchAudit"
 	case "block":
 		secPolicy.Spec.Action = "Block"
 	case "":
 		secPolicy.Spec.Action = "Block" // by default
+	}
+
+	if secPolicy.Spec.Action == "BatchAudit" && secPolicy.Spec.BatchAudit.IntervalSeconds <= 0 {
+		secPolicy.Spec.BatchAudit.IntervalSeconds = tp.DefaultBatchAuditIntervalSeconds
 	}
 
 	// add identities
@@ -2041,6 +2073,9 @@ func (dm *KubeArmorDaemon) ParseAndUpdateHostSecurityPolicy(event tp.K8sKubeArmo
 	slices.Sort(secPolicy.Spec.NodeSelector.Identities)
 
 	// add severities, tags, messages, and actions
+
+	unsupportedBatchAuditCapabilities := false
+	unsupportedBatchAuditDevices := false
 
 	if len(secPolicy.Spec.Process.MatchPaths) > 0 {
 		for idx, path := range secPolicy.Spec.Process.MatchPaths {
@@ -2327,7 +2362,16 @@ func (dm *KubeArmorDaemon) ParseAndUpdateHostSecurityPolicy(event tp.K8sKubeArmo
 					secPolicy.Spec.Device.MatchDevice[idx].Action = secPolicy.Spec.Action
 				}
 			}
+
+			if secPolicy.Spec.Device.MatchDevice[idx].Action == "BatchAudit" {
+				secPolicy.Spec.Device.MatchDevice[idx].Action = "Audit"
+				unsupportedBatchAuditDevices = true
+			}
 		}
+	}
+
+	if unsupportedBatchAuditDevices {
+		dm.Logger.Warnf("BatchAudit is not supported for device rules in host policy %s; using Audit", secPolicy.Metadata["policyName"])
 	}
 
 	if len(secPolicy.Spec.Capabilities.MatchCapabilities) > 0 {
@@ -2363,7 +2407,16 @@ func (dm *KubeArmorDaemon) ParseAndUpdateHostSecurityPolicy(event tp.K8sKubeArmo
 					secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action = secPolicy.Spec.Action
 				}
 			}
+
+			if secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action == "BatchAudit" {
+				secPolicy.Spec.Capabilities.MatchCapabilities[idx].Action = "Audit"
+				unsupportedBatchAuditCapabilities = true
+			}
 		}
+	}
+
+	if unsupportedBatchAuditCapabilities {
+		dm.Logger.Warnf("BatchAudit is not supported for capabilities in host policy %s; using Audit", secPolicy.Metadata["policyName"])
 	}
 
 	if len(secPolicy.Spec.Syscalls.MatchSyscalls) > 0 {
@@ -2422,6 +2475,11 @@ func (dm *KubeArmorDaemon) ParseAndUpdateHostSecurityPolicy(event tp.K8sKubeArmo
 			}
 
 		}
+	}
+
+	if secPolicy.Spec.Action == "BatchAudit" && (len(secPolicy.Spec.Syscalls.MatchSyscalls) > 0 || len(secPolicy.Spec.Syscalls.MatchPaths) > 0) {
+		secPolicy.Spec.Action = "Audit"
+		dm.Logger.Warnf("BatchAudit is not supported for syscalls in host policy %s; using Audit", secPolicy.Metadata["policyName"])
 	}
 
 	// update a security policy into the policy list

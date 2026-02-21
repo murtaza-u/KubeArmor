@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"os"
 	"os/user"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	cle "github.com/cilium/ebpf"
 
 	"github.com/kubearmor/KubeArmor/KubeArmor/common"
 	kl "github.com/kubearmor/KubeArmor/KubeArmor/common"
@@ -263,6 +266,16 @@ type Feeder struct {
 	AlertMapLock sync.RWMutex
 
 	ContainerNsKey map[string]common.OuterKey
+
+	BatchAuditIntervals      map[string]int32
+	BatchAuditIntervalsLock  sync.Mutex
+	BatchAuditIntervalHook   func(int32)
+	BatchAuditMap            *cle.Map
+	BatchAuditMapLock        sync.Mutex
+	BatchAuditPolicyMap      *cle.Map
+	BatchAuditPolicyMapLock  sync.Mutex
+	BatchAuditPolicyMeta     map[uint64]batchAuditPolicyMeta
+	BatchAuditPolicyMetaLock sync.RWMutex
 }
 
 // NewFeeder Function
@@ -401,6 +414,8 @@ func NewFeeder(node *tp.Node, nodeLock **sync.RWMutex) (feeder *Feeder) {
 	fd.DefaultPostures = map[string]tp.DefaultPosture{}
 	fd.DefaultPosturesLock = new(sync.Mutex)
 
+	fd.BatchAuditIntervals = map[string]int32{}
+	fd.BatchAuditPolicyMeta = map[uint64]batchAuditPolicyMeta{}
 	fd.UserNameMap = UserNameMap{
 		usernames: make(map[uint32]cachedUserName),
 		ttl:       10 * time.Minute,
@@ -437,6 +452,29 @@ func (fd *BaseFeeder) DestroyFeeder() error {
 	fd.WgServer.Wait()
 
 	return nil
+}
+
+// DestroyFeeder stops feeder resources and closes batch audit maps.
+func (fd *Feeder) DestroyFeeder() error {
+	fd.BatchAuditIntervalsLock.Lock()
+	fd.BatchAuditIntervalHook = nil
+	fd.BatchAuditIntervalsLock.Unlock()
+
+	fd.BatchAuditMapLock.Lock()
+	if fd.BatchAuditMap != nil {
+		_ = fd.BatchAuditMap.Close()
+		fd.BatchAuditMap = nil
+	}
+	fd.BatchAuditMapLock.Unlock()
+
+	fd.BatchAuditPolicyMapLock.Lock()
+	if fd.BatchAuditPolicyMap != nil {
+		_ = fd.BatchAuditPolicyMap.Close()
+		fd.BatchAuditPolicyMap = nil
+	}
+	fd.BatchAuditPolicyMapLock.Unlock()
+
+	return fd.BaseFeeder.DestroyFeeder()
 }
 
 // StrToFile Function
@@ -523,6 +561,129 @@ func (fd *Feeder) UpdateEnforcer(enforcer string) {
 	fd.EnforcerLock.Lock()
 	fd.Enforcer = enforcer
 	fd.EnforcerLock.Unlock()
+}
+
+// SetBatchAuditIntervalHook registers a callback to update the batch audit flush interval.
+func (fd *Feeder) SetBatchAuditIntervalHook(hook func(int32)) {
+	fd.BatchAuditIntervalsLock.Lock()
+	fd.BatchAuditIntervalHook = hook
+	minInterval := int32(0)
+	for _, val := range fd.BatchAuditIntervals {
+		if val <= 0 {
+			continue
+		}
+		if minInterval == 0 || val < minInterval {
+			minInterval = val
+		}
+	}
+	fd.BatchAuditIntervalsLock.Unlock()
+
+	if hook != nil {
+		hook(minInterval)
+	}
+}
+
+func (fd *Feeder) updateBatchAuditInterval(key string, interval int32, action string) {
+	fd.BatchAuditIntervalsLock.Lock()
+	if action == "DELETED" || interval <= 0 {
+		delete(fd.BatchAuditIntervals, key)
+	} else {
+		fd.BatchAuditIntervals[key] = interval
+	}
+
+	minInterval := int32(0)
+	for _, val := range fd.BatchAuditIntervals {
+		if val <= 0 {
+			continue
+		}
+		if minInterval == 0 || val < minInterval {
+			minInterval = val
+		}
+	}
+	hook := fd.BatchAuditIntervalHook
+	fd.BatchAuditIntervalsLock.Unlock()
+
+	if hook != nil {
+		hook(minInterval)
+	}
+}
+
+func (fd *Feeder) getBatchAuditMap() (*cle.Map, error) {
+	fd.BatchAuditMapLock.Lock()
+	defer fd.BatchAuditMapLock.Unlock()
+
+	if fd.BatchAuditMap != nil {
+		return fd.BatchAuditMap, nil
+	}
+
+	mapPath := filepath.Join(kl.GetMapRoot(), "kubearmor_batch_audit_agg")
+	batchMap, err := cle.LoadPinnedMap(mapPath, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	fd.BatchAuditMap = batchMap
+	return fd.BatchAuditMap, nil
+}
+
+func hashString64(value string) uint64 {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(value))
+	return hasher.Sum64()
+}
+
+func batchAuditScope(log tp.Log) string {
+	if log.Type == "MatchedHostPolicy" {
+		return "host"
+	}
+	return "container"
+}
+
+func (fd *Feeder) storeBatchAuditRaw(log tp.Log) error {
+	if len(log.RawData) == 0 && len(log.RawData2) == 0 {
+		return nil
+	}
+
+	batchMap, err := fd.getBatchAuditMap()
+	if err != nil {
+		return err
+	}
+
+	policyKey := log.NamespaceName + ":" + log.PolicyName + ":" + batchAuditScope(log)
+	eventKey := log.Operation + ":" + log.Resource + ":" + strconv.Itoa(int(log.UID)) + ":" + strconv.Itoa(int(log.OID)) + ":" + log.Result
+	policyHash := hashString64(policyKey)
+	eventHash := hashString64(eventKey)
+	tsBase := uint64(time.Now().UnixNano())
+
+	if len(log.RawData) > 0 {
+		if err := fd.storeBatchAuditRawData(batchMap, policyHash, eventHash, tsBase, log.RawData); err != nil {
+			return err
+		}
+		tsBase++
+	}
+
+	if len(log.RawData2) > 0 {
+		if err := fd.storeBatchAuditRawData(batchMap, policyHash, eventHash, tsBase, log.RawData2); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (fd *Feeder) storeBatchAuditRawData(batchMap *cle.Map, policyHash, eventHash, ts uint64, raw []byte) error {
+	var val tp.BatchAuditVal
+	key := tp.BatchAuditKey{
+		PolicyHash: policyHash,
+		EventHash:  eventHash,
+		Ts:         ts,
+	}
+
+	size := min(len(raw), tp.BatchAuditMaxBufferSize)
+	val.Size = uint32(size)
+	copy(val.Data[:], raw[:size])
+
+	return batchMap.Update(&key, &val, cle.UpdateAny)
 }
 
 // =============== //
@@ -658,13 +819,46 @@ func MarshalVisibilityLog(log tp.Log) *pb.Log {
 // PushLog Function
 // PushLog Function
 func (fd *Feeder) PushLog(log tp.Log) {
+	if log.PolicyMatched {
+		fd.BatchAuditPolicyMetaLock.RLock()
+		meta, ok := fd.BatchAuditPolicyMeta[log.PolicyHash]
+		fd.BatchAuditPolicyMetaLock.RUnlock()
+		if ok {
+			if meta.PolicyName != "" {
+				log.PolicyName = meta.PolicyName
+			}
+			if meta.Namespace != "" && log.NamespaceName == "" {
+				log.NamespaceName = meta.Namespace
+			}
+			log.Severity = meta.Severity
+			if len(meta.Tags) > 0 {
+				log.Tags = strings.Join(meta.Tags[:], ",")
+				log.ATags = meta.Tags
+			}
+			if len(meta.Message) > 0 {
+				log.Message = meta.Message
+			}
+			if log.Type == "" {
+				if meta.Scope == "host" {
+					log.Type = "MatchedHostPolicy"
+				} else {
+					log.Type = "MatchedPolicy"
+				}
+			}
+		}
+		log.Enforcer = "eBPF Monitor"
+		if log.Action == "" {
+			log.Action = "BatchAudit"
+		}
+	}
+
 	/* if enforcer == BPFLSM and log.Enforcer == ebpfmonitor ( block and default Posture Alerts from System
 	   monitor are converted to host/container logs)
 	   in case of enforcer = AppArmor only Default Posture logs will be converted to
 	   container/host log depending upon the defaultPostureLogs flag
 	*/
 	isBPFLSM := fd.GetEnforcer() == "BPFLSM"
-	if !common.IsPresetEnforcer(log.Enforcer) {
+	if !common.IsPresetEnforcer(log.Enforcer) && !log.PolicyMatched {
 		if (cfg.GlobalCfg.EnforcerAlerts && isBPFLSM && log.Enforcer == "") || (!isBPFLSM && !cfg.GlobalCfg.DefaultPostureLogs) {
 			log = fd.UpdateMatchedPolicy(log)
 			isDefaultPostureLog := strings.Contains(log.PolicyName, "DefaultPosture")
@@ -683,6 +877,10 @@ func (fd *Feeder) PushLog(log tp.Log) {
 				log.Enforcer = "BPFLSM"
 			}
 		}
+	}
+
+	if log.Action == "BatchAudit" && !log.BatchAuditFlush {
+		return
 	}
 
 	// change enforcer and format log Resource

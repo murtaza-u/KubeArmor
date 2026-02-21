@@ -61,6 +61,10 @@ func (mon *SystemMonitor) BuildLogBase(eventID int32, msg ContextCombined, readl
 	log.Timestamp = timestamp
 	log.UpdatedTime = updatedTime
 	log.ContainerID = msg.ContainerID
+	log.RawData = msg.RawData
+	log.BatchAuditFlush = msg.BatchAuditFlush
+	log.PolicyHash = msg.PolicyHash
+	log.PolicyMatched = msg.PolicyMatched
 
 	if log.ContainerID != "" {
 		log = mon.UpdateContainerInfoByContainerID(log)
@@ -138,461 +142,14 @@ func (mon *SystemMonitor) UpdateLogs() {
 				continue
 			}
 
-			// generate a log
-			log := mon.BuildLogBase(msg.ContextSys.EventID, msg, true)
-
-			switch msg.ContextSys.EventID {
-			case SysOpen:
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-
-				var fileName string
-				var fileOpenFlags string
-
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					fileName = val
-				}
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					fileOpenFlags = val
-				}
-
-				log.Operation = "File"
-				log.Resource = fileName
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " flags=" + fileOpenFlags
-
-			case SysOpenAt:
-				if len(msg.ContextArgs) != 3 {
-					continue
-				}
-
-				var fd string
-				var fileName string
-				var fileOpenFlags string
-
-				if val, ok := msg.ContextArgs[0].(int32); ok {
-					fd = strconv.Itoa(int(val))
-				}
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					fileName = val
-				}
-				if val, ok := msg.ContextArgs[2].(string); ok {
-					fileOpenFlags = val
-				}
-
-				log.Operation = "File"
-				log.Resource = fileName
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd + " flags=" + fileOpenFlags
-
-			case SysUnlink:
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-
-				var fileName string
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					fileName = val
-				}
-
-				log.Operation = "File"
-				log.Resource = fileName
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID))
-
-			case SysUnlinkAt:
-				if len(msg.ContextArgs) != 3 {
-					continue
-				}
-
-				var fileName string
-				var fileUnlinkAtFlags string
-
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					fileName = val
-				}
-				if val, ok := msg.ContextArgs[2].(string); ok {
-					fileUnlinkAtFlags = val
-				}
-
-				log.Operation = "File"
-				log.Resource = fileName
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " flags=" + fileUnlinkAtFlags
-
-			case SysRmdir:
-				if len(msg.ContextArgs) != 1 {
-					continue
-				}
-
-				var fileName string
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					fileName = val
-				}
-
-				log.Operation = "File"
-				log.Resource = fileName
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID))
-
-			case SysChown:
-				if len(msg.ContextArgs) != 3 {
-					continue
-				}
-				var fileName string
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					fileName = val
-				}
-				var uid int
-				if val, ok := msg.ContextArgs[1].(int32); ok {
-					uid = int(val)
-				}
-
-				var guid int
-				if val, ok := msg.ContextArgs[2].(int32); ok {
-					guid = int(val)
-				}
-
-				log.Operation = "File"
-				log.Resource = fileName
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " userid=" + strconv.Itoa(uid) + " group=" + strconv.Itoa(guid)
-
-			case SysFChownAt:
-				if len(msg.ContextArgs) != 5 {
-					continue
-				}
-				var fileName string
-				var uid int
-				var guid int
-				var mode int
-
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					fileName = val
-				}
-
-				if val, ok := msg.ContextArgs[2].(int32); ok {
-					uid = int(val)
-				}
-
-				if val, ok := msg.ContextArgs[3].(int32); ok {
-					guid = int(val)
-				}
-
-				if val, ok := msg.ContextArgs[4].(int32); ok {
-					mode = int(val)
-				}
-
-				log.Operation = "File"
-				log.Resource = fileName
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " userid=" + strconv.Itoa(uid) + " group=" + strconv.Itoa(guid) + " mode=" + strconv.Itoa(mode)
-
-			case SysSetuid, SysSetgid:
-				if len(msg.ContextArgs) != 1 {
-					continue
-				}
-
-				var uid int
-				if val, ok := msg.ContextArgs[0].(int32); ok {
-					uid = int(val)
-				}
-				log.Operation = "Syscall"
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " userid=" + strconv.Itoa(uid)
-
-			case SysMount:
-				if len(msg.ContextArgs) != 5 {
-					continue
-				}
-				var source, target, fstype, data string
-				var flags int
-
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					source = val
-				}
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					target = val
-				}
-				if val, ok := msg.ContextArgs[2].(string); ok {
-					fstype = val
-				}
-				if val, ok := msg.ContextArgs[3].(int32); ok {
-					flags = int(val)
-				}
-				if val, ok := msg.ContextArgs[4].(string); ok {
-					data = val
-				}
-
-				log.Operation = "Syscall"
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " source=" + source + " target=" + target + " filesystem=" + fstype + " mountflag=" + strconv.Itoa(flags) + " data=" + data
-
-			case SysUmount:
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-				var target string
-				var flags int
-
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					target = val
-				}
-				if val, ok := msg.ContextArgs[1].(int32); ok {
-					flags = int(val)
-				}
-
-				log.Operation = "Syscall"
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " target=" + target + " flag=" + strconv.Itoa(flags)
-
-			case SysClose:
-				if len(msg.ContextArgs) != 1 {
-					continue
-				}
-
-				var fd string
-
-				if val, ok := msg.ContextArgs[0].(int32); ok {
-					fd = strconv.Itoa(int(val))
-				}
-
-				log.Operation = "File"
-				log.Resource = ""
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
-
-			case SysPtrace:
-				if len(msg.ContextArgs) != 3 {
-					continue
-				}
-
-				var request string
-				var pid string
-				var binary string
-
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					request = val
-				}
-
-				if val, ok := msg.ContextArgs[1].(int32); ok {
-					pid = strconv.Itoa(int(val))
-				}
-
-				if val, ok := msg.ContextArgs[2].(string); ok {
-					binary = val
-				}
-
-				log.Resource = binary
-				log.Operation = "Process"
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " request=" + request + " pid=" + pid + " process=" + binary
-
-			case SysSocket: // domain, type, proto
-				if len(msg.ContextArgs) != 3 {
-					continue
-				}
-
-				var sockDomain string
-				var sockType string
-				var sockProtocol int32
-
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					sockDomain = val
-				}
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					sockType = val
-				}
-				if val, ok := msg.ContextArgs[2].(int32); ok {
-					sockProtocol = val
-				}
-
-				log.Operation = "Network"
-				log.Resource = "domain=" + sockDomain + " type=" + sockType + " protocol=" + GetProtocol(sockProtocol)
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID))
-
-			case TCPConnect, TCPConnectv6, TCPAccept, TCPAcceptv6:
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-				var sockAddr map[string]string
-				var protocol string
-				if val, ok := msg.ContextArgs[0].(string); ok {
-					protocol = val
-				}
-
-				if val, ok := msg.ContextArgs[1].(map[string]string); ok {
-					sockAddr = val
-				}
-
-				log.Operation = "Network"
-				log.Resource = "remoteip=" + sockAddr["sin_addr"] + " port=" + sockAddr["sin_port"] + " protocol=" + protocol
-				if msg.ContextSys.EventID == TCPConnect || msg.ContextSys.EventID == TCPConnectv6 {
-					log.Data = "kprobe=tcp_connect"
-				} else {
-					log.Data = "kprobe=tcp_accept"
-				}
-				log.Data = log.Data + " domain=" + sockAddr["sa_family"]
-
-			case SysConnect: // fd, sockaddr
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-
-				var fd string
-				var sockAddr map[string]string
-
-				if val, ok := msg.ContextArgs[0].(int32); ok {
-					fd = strconv.Itoa(int(val))
-				}
-				if val, ok := msg.ContextArgs[1].(map[string]string); ok {
-					sockAddr = val
-				}
-
-				log.Operation = "Network"
-				log.Resource = ""
-
-				for k, v := range sockAddr {
-					if log.Resource == "" {
-						log.Resource = k + "=" + v
-					} else {
-						log.Resource = log.Resource + " " + k + "=" + v
-					}
-				}
-
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
-
-			case SysAccept: // fd, sockaddr
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-
-				var fd string
-				var sockAddr map[string]string
-
-				if val, ok := msg.ContextArgs[0].(int32); ok {
-					fd = strconv.Itoa(int(val))
-				}
-				if val, ok := msg.ContextArgs[1].(map[string]string); ok {
-					sockAddr = val
-				}
-
-				log.Operation = "Network"
-				log.Resource = ""
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
-
-				for k, v := range sockAddr {
-					if log.Resource == "" {
-						log.Resource = k + "=" + v
-					} else {
-						log.Resource = log.Resource + " " + k + "=" + v
-					}
-				}
-
-			case SysBind: // fd, sockaddr
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-
-				var fd string
-				var sockAddr map[string]string
-
-				if val, ok := msg.ContextArgs[0].(int32); ok {
-					fd = strconv.Itoa(int(val))
-				}
-				if val, ok := msg.ContextArgs[1].(map[string]string); ok {
-					sockAddr = val
-				}
-
-				log.Operation = "Network"
-				log.Resource = ""
-
-				for k, v := range sockAddr {
-					if log.Resource == "" {
-						log.Resource = k + "=" + v
-					} else {
-						log.Resource = log.Resource + " " + k + "=" + v
-					}
-				}
-
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
-
-			case SysListen: // fd
-				if len(msg.ContextArgs) != 2 {
-					continue
-				}
-
-				var fd string
-
-				if val, ok := msg.ContextArgs[0].(int32); ok {
-					fd = strconv.Itoa(int(val))
-				}
-
-				log.Operation = "Network"
-				log.Resource = ""
-				log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
-
-			case UDPSendMsg:
-				if len(msg.ContextArgs) != 3 {
-					continue
-				}
-				domains := ""
-				if val, ok := msg.ContextArgs[1].(string); ok {
-					domains = val
-				}
-				var sockAddr map[string]string
-				if val, ok := msg.ContextArgs[0].(map[string]string); ok {
-					sockAddr = val
-				}
-				qtype := ""
-				if val, ok := msg.ContextArgs[2].(uint16); ok {
-					if val == 1 {
-						qtype = "A"
-					}
-					if val == 28 {
-						qtype = "AAAA"
-					}
-				}
-
-				log.Data = "kfunc=UDP_SENDMSG" + " domain=" + domains[:len(domains)-1] + // removed trailing . from domain name
-					" daddr=" + sockAddr["sin_addr"] +
-					" qtype=" + qtype
-				log.Operation = "Network"
-				log.Resource = "sa_family=" + sockAddr["sa_family"] + " sin_port=53"
-
-			case DropAlert: // throttling alert
-				log.Operation = "AlertThreshold"
-				log.Type = "SystemEvent"
-				log.MaxAlertsPerSec = cfg.GlobalCfg.MaxAlertPerSec
-				log.DroppingAlertsInterval = cfg.GlobalCfg.ThrottleSec
-
-			default:
+			log, ok := mon.buildLogFromContext(msg)
+			if !ok {
 				continue
 			}
 
-			if mon.isProcessInformationMissing(&log) {
-				continue
-			}
-
-			// fallback logic: in case we get relative path in log.Resource for file and process event
-			// then we join cwd + resource to get pull path
-			if log.Operation == "Process" || log.Operation == "File" {
-				if !strings.HasPrefix(strings.Split(log.Resource, " ")[0], "/") && log.Cwd != "/" {
-					log.Resource = filepath.Join(log.Cwd, log.Resource)
-				}
-			}
-
-			// get error message
-			if msg.ContextSys.Retval < 0 {
-				message := getErrorMessage(msg.ContextSys.Retval)
-				if message != "" {
-					log.Result = message
-				} else {
-					log.Result = fmt.Sprintf("Unknown (%d)", msg.ContextSys.Retval)
-				}
-			} else {
-				log.Result = "Passed"
-			}
-
-			// exec event
-			log.ExecEvent.ExecID = strconv.FormatUint(msg.ContextSys.ExecID, 10)
-			if comm := strings.TrimRight(string(msg.ContextSys.Comm[:]), "\x00"); len(comm) > 0 {
-				log.ExecEvent.ExecutableName = comm
-			}
-
-			// push the generated log
 			if mon.Logger != nil {
 				go mon.Logger.PushLog(log)
-				if isAuditedSyscall(msg.ContextSys.EventID) && log.Operation != "Syscall" {
+				if !msg.BatchAuditFlush && isAuditedSyscall(msg.ContextSys.EventID) && log.Operation != "Syscall" {
 					log.Action = "Audit"
 					log.Operation = "Syscall"
 					go mon.Logger.PushLog(log)
@@ -600,6 +157,456 @@ func (mon *SystemMonitor) UpdateLogs() {
 			}
 		}
 	}
+}
+
+func (mon *SystemMonitor) buildLogFromContext(msg ContextCombined) (tp.Log, bool) {
+	log := mon.BuildLogBase(msg.ContextSys.EventID, msg, true)
+
+	switch msg.ContextSys.EventID {
+	case SysOpen:
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+
+		var fileName string
+		var fileOpenFlags string
+
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			fileName = val
+		}
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			fileOpenFlags = val
+		}
+
+		log.Operation = "File"
+		log.Resource = fileName
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " flags=" + fileOpenFlags
+
+	case SysOpenAt:
+		if len(msg.ContextArgs) != 3 {
+			return tp.Log{}, false
+		}
+
+		var fd string
+		var fileName string
+		var fileOpenFlags string
+
+		if val, ok := msg.ContextArgs[0].(int32); ok {
+			fd = strconv.Itoa(int(val))
+		}
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			fileName = val
+		}
+		if val, ok := msg.ContextArgs[2].(string); ok {
+			fileOpenFlags = val
+		}
+
+		log.Operation = "File"
+		log.Resource = fileName
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd + " flags=" + fileOpenFlags
+
+	case SysUnlink:
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+
+		var fileName string
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			fileName = val
+		}
+
+		log.Operation = "File"
+		log.Resource = fileName
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID))
+
+	case SysUnlinkAt:
+		if len(msg.ContextArgs) != 3 {
+			return tp.Log{}, false
+		}
+
+		var fileName string
+		var fileUnlinkAtFlags string
+
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			fileName = val
+		}
+		if val, ok := msg.ContextArgs[2].(string); ok {
+			fileUnlinkAtFlags = val
+		}
+
+		log.Operation = "File"
+		log.Resource = fileName
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " flags=" + fileUnlinkAtFlags
+
+	case SysRmdir:
+		if len(msg.ContextArgs) != 1 {
+			return tp.Log{}, false
+		}
+
+		var fileName string
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			fileName = val
+		}
+
+		log.Operation = "File"
+		log.Resource = fileName
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID))
+
+	case SysChown:
+		if len(msg.ContextArgs) != 3 {
+			return tp.Log{}, false
+		}
+		var fileName string
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			fileName = val
+		}
+		var uid int
+		if val, ok := msg.ContextArgs[1].(int32); ok {
+			uid = int(val)
+		}
+
+		var guid int
+		if val, ok := msg.ContextArgs[2].(int32); ok {
+			guid = int(val)
+		}
+
+		log.Operation = "File"
+		log.Resource = fileName
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " userid=" + strconv.Itoa(uid) + " group=" + strconv.Itoa(guid)
+
+	case SysFChownAt:
+		if len(msg.ContextArgs) != 5 {
+			return tp.Log{}, false
+		}
+		var fileName string
+		var uid int
+		var guid int
+		var mode int
+
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			fileName = val
+		}
+
+		if val, ok := msg.ContextArgs[2].(int32); ok {
+			uid = int(val)
+		}
+
+		if val, ok := msg.ContextArgs[3].(int32); ok {
+			guid = int(val)
+		}
+
+		if val, ok := msg.ContextArgs[4].(int32); ok {
+			mode = int(val)
+		}
+
+		log.Operation = "File"
+		log.Resource = fileName
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " userid=" + strconv.Itoa(uid) + " group=" + strconv.Itoa(guid) + " mode=" + strconv.Itoa(mode)
+
+	case SysSetuid, SysSetgid:
+		if len(msg.ContextArgs) != 1 {
+			return tp.Log{}, false
+		}
+
+		var uid int
+		if val, ok := msg.ContextArgs[0].(int32); ok {
+			uid = int(val)
+		}
+		log.Operation = "Syscall"
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " userid=" + strconv.Itoa(uid)
+
+	case SysMount:
+		if len(msg.ContextArgs) != 5 {
+			return tp.Log{}, false
+		}
+		var source, target, fstype, data string
+		var flags int
+
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			source = val
+		}
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			target = val
+		}
+		if val, ok := msg.ContextArgs[2].(string); ok {
+			fstype = val
+		}
+		if val, ok := msg.ContextArgs[3].(int32); ok {
+			flags = int(val)
+		}
+		if val, ok := msg.ContextArgs[4].(string); ok {
+			data = val
+		}
+
+		log.Operation = "Syscall"
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " source=" + source + " target=" + target + " filesystem=" + fstype + " mountflag=" + strconv.Itoa(flags) + " data=" + data
+
+	case SysUmount:
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+		var target string
+		var flags int
+
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			target = val
+		}
+		if val, ok := msg.ContextArgs[1].(int32); ok {
+			flags = int(val)
+		}
+
+		log.Operation = "Syscall"
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " target=" + target + " flag=" + strconv.Itoa(flags)
+
+	case SysClose:
+		if len(msg.ContextArgs) != 1 {
+			return tp.Log{}, false
+		}
+
+		var fd string
+
+		if val, ok := msg.ContextArgs[0].(int32); ok {
+			fd = strconv.Itoa(int(val))
+		}
+
+		log.Operation = "File"
+		log.Resource = ""
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
+
+	case SysPtrace:
+		if len(msg.ContextArgs) != 3 {
+			return tp.Log{}, false
+		}
+
+		var request string
+		var pid string
+		var binary string
+
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			request = val
+		}
+
+		if val, ok := msg.ContextArgs[1].(int32); ok {
+			pid = strconv.Itoa(int(val))
+		}
+
+		if val, ok := msg.ContextArgs[2].(string); ok {
+			binary = val
+		}
+
+		log.Resource = binary
+		log.Operation = "Process"
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " request=" + request + " pid=" + pid + " process=" + binary
+
+	case SysSocket: // domain, type, proto
+		if len(msg.ContextArgs) != 3 {
+			return tp.Log{}, false
+		}
+
+		var sockDomain string
+		var sockType string
+		var sockProtocol int32
+
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			sockDomain = val
+		}
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			sockType = val
+		}
+		if val, ok := msg.ContextArgs[2].(int32); ok {
+			sockProtocol = val
+		}
+
+		log.Operation = "Network"
+		log.Resource = "domain=" + sockDomain + " type=" + sockType + " protocol=" + GetProtocol(sockProtocol)
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID))
+
+	case TCPConnect, TCPConnectv6, TCPAccept, TCPAcceptv6:
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+		var sockAddr map[string]string
+		var protocol string
+		if val, ok := msg.ContextArgs[0].(string); ok {
+			protocol = val
+		}
+
+		if val, ok := msg.ContextArgs[1].(map[string]string); ok {
+			sockAddr = val
+		}
+
+		log.Operation = "Network"
+		log.Resource = "remoteip=" + sockAddr["sin_addr"] + " port=" + sockAddr["sin_port"] + " protocol=" + protocol
+		if msg.ContextSys.EventID == TCPConnect || msg.ContextSys.EventID == TCPConnectv6 {
+			log.Data = "kprobe=tcp_connect"
+		} else {
+			log.Data = "kprobe=tcp_accept"
+		}
+		log.Data = log.Data + " domain=" + sockAddr["sa_family"]
+
+	case SysConnect: // fd, sockaddr
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+
+		var fd string
+		var sockAddr map[string]string
+
+		if val, ok := msg.ContextArgs[0].(int32); ok {
+			fd = strconv.Itoa(int(val))
+		}
+		if val, ok := msg.ContextArgs[1].(map[string]string); ok {
+			sockAddr = val
+		}
+
+		log.Operation = "Network"
+		log.Resource = ""
+
+		for k, v := range sockAddr {
+			if log.Resource == "" {
+				log.Resource = k + "=" + v
+			} else {
+				log.Resource = log.Resource + " " + k + "=" + v
+			}
+		}
+
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
+
+	case SysAccept: // fd, sockaddr
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+
+		var fd string
+		var sockAddr map[string]string
+
+		if val, ok := msg.ContextArgs[0].(int32); ok {
+			fd = strconv.Itoa(int(val))
+		}
+		if val, ok := msg.ContextArgs[1].(map[string]string); ok {
+			sockAddr = val
+		}
+
+		log.Operation = "Network"
+		log.Resource = ""
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
+
+		for k, v := range sockAddr {
+			if log.Resource == "" {
+				log.Resource = k + "=" + v
+			} else {
+				log.Resource = log.Resource + " " + k + "=" + v
+			}
+		}
+
+	case SysBind: // fd, sockaddr
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+
+		var fd string
+		var sockAddr map[string]string
+
+		if val, ok := msg.ContextArgs[0].(int32); ok {
+			fd = strconv.Itoa(int(val))
+		}
+		if val, ok := msg.ContextArgs[1].(map[string]string); ok {
+			sockAddr = val
+		}
+
+		log.Operation = "Network"
+		log.Resource = ""
+
+		for k, v := range sockAddr {
+			if log.Resource == "" {
+				log.Resource = k + "=" + v
+			} else {
+				log.Resource = log.Resource + " " + k + "=" + v
+			}
+		}
+
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
+
+	case SysListen: // fd
+		if len(msg.ContextArgs) != 2 {
+			return tp.Log{}, false
+		}
+
+		var fd string
+
+		if val, ok := msg.ContextArgs[0].(int32); ok {
+			fd = strconv.Itoa(int(val))
+		}
+
+		log.Operation = "Network"
+		log.Resource = ""
+		log.Data = "syscall=" + GetSyscallName(int32(msg.ContextSys.EventID)) + " fd=" + fd
+
+	case UDPSendMsg:
+		if len(msg.ContextArgs) != 3 {
+			return tp.Log{}, false
+		}
+		domains := ""
+		if val, ok := msg.ContextArgs[1].(string); ok {
+			domains = val
+		}
+		var sockAddr map[string]string
+		if val, ok := msg.ContextArgs[0].(map[string]string); ok {
+			sockAddr = val
+		}
+		qtype := ""
+		if val, ok := msg.ContextArgs[2].(uint16); ok {
+			if val == 1 {
+				qtype = "A"
+			}
+			if val == 28 {
+				qtype = "AAAA"
+			}
+		}
+
+		log.Data = "kfunc=UDP_SENDMSG" + " domain=" + domains[:len(domains)-1] +
+			" daddr=" + sockAddr["sin_addr"] +
+			" qtype=" + qtype
+		log.Operation = "Network"
+		log.Resource = "sa_family=" + sockAddr["sa_family"] + " sin_port=53"
+
+	case DropAlert: // throttling alert
+		log.Operation = "AlertThreshold"
+		log.Type = "SystemEvent"
+		log.MaxAlertsPerSec = cfg.GlobalCfg.MaxAlertPerSec
+		log.DroppingAlertsInterval = cfg.GlobalCfg.ThrottleSec
+
+	default:
+		return tp.Log{}, false
+	}
+
+	if mon.isProcessInformationMissing(&log) {
+		return tp.Log{}, false
+	}
+
+	if log.Operation == "Process" || log.Operation == "File" {
+		if !strings.HasPrefix(strings.Split(log.Resource, " ")[0], "/") && log.Cwd != "/" {
+			log.Resource = filepath.Join(log.Cwd, log.Resource)
+		}
+	}
+
+	if msg.ContextSys.Retval < 0 {
+		message := getErrorMessage(msg.ContextSys.Retval)
+		if message != "" {
+			log.Result = message
+		} else {
+			log.Result = fmt.Sprintf("Unknown (%d)", msg.ContextSys.Retval)
+		}
+	} else {
+		log.Result = "Passed"
+	}
+
+	log.ExecEvent.ExecID = strconv.FormatUint(msg.ContextSys.ExecID, 10)
+	if comm := strings.TrimRight(string(msg.ContextSys.Comm[:]), "\x00"); len(comm) > 0 {
+		log.ExecEvent.ExecutableName = comm
+	}
+
+	return log, true
 }
 
 func (mon *SystemMonitor) isProcessInformationMissing(log *tp.Log) bool {
