@@ -377,7 +377,7 @@ struct batch_audit_aggregation_val_t
     __u64 last_seen;
     __u32 entry_sample_size;
     __u32 ret_sample_size;
-    __u8 sample_data[MAX_BUFFER_SIZE * 2];
+    __u8 sample_data[MAX_BUFFER_SIZE];
 };
 
 struct
@@ -1568,12 +1568,8 @@ static __always_inline bool batch_audit_match_process(struct outer_key *okey, co
     pkey->okey = *okey;
     struct batch_audit_paths_t *paths = &pkey->paths;
 
-#pragma unroll
-    for (int i = 0; i < MAX_PATH_LEN; i++)
-    {
-        paths->path[i] = '\0';
-        paths->source[i] = '\0';
-    }
+    __builtin_memset(paths->path, 0, sizeof(paths->path));
+    __builtin_memset(paths->source, 0, sizeof(paths->source));
     bpf_probe_read_str(paths->path, sizeof(paths->path), path);
     if (source && source[0])
     {
@@ -1604,15 +1600,9 @@ static __always_inline bool batch_audit_match_process(struct outer_key *okey, co
             last_slash = i;
         }
     }
-
     if (last_slash >= 0 && last_slash + 1 < MAX_PATH_LEN)
     {
-#pragma unroll
-        for (int i = 0; i < MAX_PATH_LEN; i++)
-        {
-            paths->path[i] = '\0';
-        }
-
+        __builtin_memset(paths->path, 0, sizeof(paths->path));
         bpf_probe_read_str(paths->path, sizeof(paths->path), &path[last_slash + 1]);
         val = bpf_map_lookup_elem(&batch_audit_policies, pkey);
         if (val && (val->process_mask & BATCH_AUDIT_RULE_EXEC))
@@ -1624,6 +1614,59 @@ static __always_inline bool batch_audit_match_process(struct outer_key *okey, co
             *policy_hash = val->policy_hash;
             return true;
         }
+    }
+
+    __builtin_memset(paths->path, 0, sizeof(paths->path));
+    bool matched = false;
+
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i ++)
+    {
+        char c = path[i];
+        paths->path[i] = c;
+
+        if (c == '\0')
+        {
+            if (matched)
+            {
+                return true;
+            }
+            break;
+        }
+
+        if (c != '/')
+        {
+            continue;
+        }
+
+        if (matched)
+        {
+            return false;
+        }
+
+        val = bpf_map_lookup_elem(&batch_audit_policies, pkey);
+        if (!val)
+        {
+            continue;
+        }
+
+        if (!(val -> process_mask & BATCH_AUDIT_RULE_DIR) || !(val -> process_mask & BATCH_AUDIT_RULE_EXEC))
+        {
+            continue;
+        }
+
+        if (!batch_audit_owner_match(uid, oid, val->process_mask))
+        {
+              return false;
+        }
+
+        *policy_hash = val->policy_hash;
+        if (val -> process_mask & BATCH_AUDIT_RULE_RECURSIVE)
+        {
+            return true;
+        }
+
+        matched = true;
     }
 
     return false;
@@ -1646,12 +1689,8 @@ static __always_inline bool batch_audit_match_file(struct outer_key *okey, const
     pkey->okey = *okey;
     struct batch_audit_paths_t *paths = &pkey->paths;
 
-#pragma unroll
-    for (int i = 0; i < MAX_PATH_LEN; i++)
-    {
-        paths->path[i] = '\0';
-        paths->source[i] = '\0';
-    }
+    __builtin_memset(paths->path, 0, sizeof(paths->path));
+    __builtin_memset(paths->source, 0, sizeof(paths->source));
     bpf_probe_read_str(paths->path, sizeof(paths->path), path);
     if (source && source[0])
     {
@@ -1673,6 +1712,66 @@ static __always_inline bool batch_audit_match_file(struct outer_key *okey, const
         }
         *policy_hash = val->policy_hash;
         return true;
+    }
+
+    __builtin_memset(paths->path, 0, sizeof(paths->path));
+    bool matched = false;
+
+#pragma unroll
+    for (int i = 0; i < MAX_PATH_LEN; i ++)
+    {
+        char c = path[i];
+        paths->path[i] = c;
+
+        if (c == '\0')
+        {
+            if (matched)
+            {
+                return true;
+            }
+            break;
+        }
+
+        if (c != '/')
+        {
+            continue;
+        }
+
+        if (matched)
+        {
+            return false;
+        }
+
+        val = bpf_map_lookup_elem(&batch_audit_policies, pkey);
+        if (!val)
+        {
+            continue;
+        }
+
+        if (!(val->file_mask & BATCH_AUDIT_RULE_DIR))
+        {
+            continue;
+        }
+
+        if (!batch_audit_owner_match(uid, oid, val->file_mask))
+        {
+            return false;
+        }
+
+        // TODO: we might want to verify if this behavior is the same as for
+        // Audit actions.
+        if (has_flags && (val->file_mask & BATCH_AUDIT_RULE_READ) && !(val->file_mask & BATCH_AUDIT_RULE_WRITE) && !is_readonly)
+        {
+            return false;
+        }
+
+        *policy_hash = val->policy_hash;
+        if (val -> file_mask & BATCH_AUDIT_RULE_RECURSIVE)
+        {
+            return true;
+        }
+
+        matched = true;
     }
 
     return false;

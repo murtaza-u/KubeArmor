@@ -18,8 +18,7 @@ import (
 
 const (
 	batchAuditMaxPathLen           = 200
-	batchAuditBufSize              = 32768
-	batchAuditSampleSize           = batchAuditBufSize * 2
+	batchAuditSampleSize           = 32768
 	batchAuditFallbackPollInterval = 60
 
 	batchAuditRuleExec      uint16 = 1 << 0
@@ -321,7 +320,6 @@ func (mon *SystemMonitor) applyBatchAuditPolicySpec(ns NsKey, spec batchAuditPol
 		if dir.Recursive {
 			mask |= batchAuditRuleRecursive
 		}
-
 		ruleDir := normalizeBatchAuditDir(dir.Directory)
 		mon.updateBatchAuditPolicyRuleFromSources(ns, ruleDir, dir.FromSource, mask, 0, policyHash)
 	}
