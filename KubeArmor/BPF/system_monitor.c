@@ -1812,17 +1812,17 @@ static __always_inline void batch_audit_file_aggregate(u32 id, sys_context_t *co
         {
             u64 hash = 0;
             char op = 'F';
-            hash = fnv1a_hash64(&op, sizeof(op), hash);
-            hash = fnv1a_hash64(&id, sizeof(id), hash);
+            hash = fnv1a_hash_u8((u8)op, hash);
+            hash = fnv1a_hash_u32(id, hash);
             hash = fnv1a_hash64_str(paths->path, sizeof(paths->path), hash);
-            hash = fnv1a_hash64(&okey.pid_ns, sizeof(okey.pid_ns), hash);
-            hash = fnv1a_hash64(&okey.mnt_ns, sizeof(okey.mnt_ns), hash);
-            hash = fnv1a_hash64(&context->uid, sizeof(context->uid), hash);
-            hash = fnv1a_hash64(&context->oid, sizeof(context->oid), hash);
-            hash = fnv1a_hash64(&context->retval, sizeof(context->retval), hash);
+            hash = fnv1a_hash_u32(okey.pid_ns, hash);
+            hash = fnv1a_hash_u32(okey.mnt_ns, hash);
+            hash = fnv1a_hash_u32(context->uid, hash);
+            hash = fnv1a_hash_u32(context->oid, hash);
+            hash = fnv1a_hash_s64(context->retval, hash);
             if (has_flags)
             {
-                hash = fnv1a_hash64(&flags, sizeof(flags), hash);
+                hash = fnv1a_hash_u32(flags, hash);
             }
 
             if (off)
@@ -2209,13 +2209,13 @@ int kretprobe__execve(struct pt_regs *ctx)
         {
             u64 hash = 0;
             char op = 'P';
-            hash = fnv1a_hash64(&op, sizeof(op), hash);
+            hash = fnv1a_hash_u8((u8)op, hash);
             hash = fnv1a_hash64_str(paths->path, sizeof(paths->path), hash);
-            hash = fnv1a_hash64(&okey.pid_ns, sizeof(okey.pid_ns), hash);
-            hash = fnv1a_hash64(&okey.mnt_ns, sizeof(okey.mnt_ns), hash);
-            hash = fnv1a_hash64(&context.uid, sizeof(context.uid), hash);
-            hash = fnv1a_hash64(&oid, sizeof(oid), hash);
-            hash = fnv1a_hash64(&context.retval, sizeof(context.retval), hash);
+            hash = fnv1a_hash_u32(okey.pid_ns, hash);
+            hash = fnv1a_hash_u32(okey.mnt_ns, hash);
+            hash = fnv1a_hash_u32(context.uid, hash);
+            hash = fnv1a_hash_u32(oid, hash);
+            hash = fnv1a_hash_s64(context.retval, hash);
 
             u32 *off = get_buffer_offset(DATA_BUF_TYPE);
             if (off)
@@ -2407,13 +2407,13 @@ int kretprobe__execveat(struct pt_regs *ctx)
         {
             u64 hash = 0;
             char op = 'P';
-            hash = fnv1a_hash64(&op, sizeof(op), hash);
+            hash = fnv1a_hash_u8((u8)op, hash);
             hash = fnv1a_hash64_str(paths->path, sizeof(paths->path), hash);
-            hash = fnv1a_hash64(&okey.pid_ns, sizeof(okey.pid_ns), hash);
-            hash = fnv1a_hash64(&okey.mnt_ns, sizeof(okey.mnt_ns), hash);
-            hash = fnv1a_hash64(&context.uid, sizeof(context.uid), hash);
-            hash = fnv1a_hash64(&oid, sizeof(oid), hash);
-            hash = fnv1a_hash64(&context.retval, sizeof(context.retval), hash);
+            hash = fnv1a_hash_u32(okey.pid_ns, hash);
+            hash = fnv1a_hash_u32(okey.mnt_ns, hash);
+            hash = fnv1a_hash_u32(context.uid, hash);
+            hash = fnv1a_hash_u32(oid, hash);
+            hash = fnv1a_hash_s64(context.retval, hash);
 
             u32 *off = get_buffer_offset(DATA_BUF_TYPE);
             if (off)
