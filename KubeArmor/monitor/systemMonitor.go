@@ -157,6 +157,7 @@ type SystemMonitor struct {
 	NsVisibilityMap     map[NsKey]*cle.Map
 	NamespacePidsMap    map[string]NsVisibility
 	BatchAuditPolicies  map[uint64]batchAuditPolicyMeta
+	BatchAuditWakeChan  chan struct{}
 	BpfMapLock          *sync.RWMutex
 	BatchAuditStateLock *sync.RWMutex
 	PinPath             string
@@ -217,6 +218,7 @@ func NewSystemMonitor(node *tp.Node, nodeLock **sync.RWMutex, logger *fd.Feeder,
 	mon.NsVisibilityMap = make(map[NsKey]*cle.Map)
 	mon.NamespacePidsMap = make(map[string]NsVisibility)
 	mon.BatchAuditPolicies = make(map[uint64]batchAuditPolicyMeta)
+	mon.BatchAuditWakeChan = make(chan struct{}, 1)
 	mon.BatchAuditStateLock = new(sync.RWMutex)
 	mon.BpfVisibilityMapSpec = cle.MapSpec{
 		Type:       cle.Hash,
@@ -727,6 +729,7 @@ func (mon *SystemMonitor) DestroySystemMonitor() error {
 	defer (*mon.MonitorLock).Unlock()
 
 	mon.Status = false
+	mon.notifyBatchAuditRefresh()
 
 	if mon.SyscallPerfMap != nil {
 		if err := mon.SyscallPerfMap.Close(); err != nil {

@@ -95,6 +95,29 @@ func normalizeBatchAuditDir(dir string) string {
 	return dir + "/"
 }
 
+func (mon *SystemMonitor) updateBatchAuditPolicyRuleFromSources(ns NsKey, path string, from []tp.MatchSourceType, processMask, fileMask uint16, policyHash uint64) {
+	if len(from) == 0 {
+		mon.updateBatchAuditPolicyRule(ns, path, "", processMask, fileMask, policyHash)
+		return
+	}
+
+	added := false
+	for _, src := range from {
+		sourcePath := strings.TrimSpace(src.Path)
+		if sourcePath == "" {
+			continue
+		}
+		mon.updateBatchAuditPolicyRule(ns, path, sourcePath, processMask, fileMask, policyHash)
+		added = true
+	}
+
+	if added {
+		return
+	}
+
+	mon.Logger.Warnf("skipping batch audit rule with empty fromSource entries for path=%s", path)
+}
+
 func batchAuditPolicyHash(kind, namespace, name string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(kind + "/" + namespace + "/" + name))
@@ -219,6 +242,17 @@ func (mon *SystemMonitor) upsertBatchAuditPolicyMeta(hash uint64, meta batchAudi
 	mon.BatchAuditStateLock.Unlock()
 }
 
+func (mon *SystemMonitor) notifyBatchAuditRefresh() {
+	if mon.BatchAuditWakeChan == nil {
+		return
+	}
+
+	select {
+	case mon.BatchAuditWakeChan <- struct{}{}:
+	default:
+	}
+}
+
 func (mon *SystemMonitor) endpointNsKeys(endPoint tp.EndPoint) []NsKey {
 	containers := *(mon.Containers)
 	containersLock := *(mon.ContainersLock)
@@ -276,14 +310,7 @@ func (mon *SystemMonitor) applyBatchAuditPolicySpec(ns NsKey, spec batchAuditPol
 			rulePath = path.ExecName
 		}
 
-		if len(path.FromSource) == 0 {
-			mon.updateBatchAuditPolicyRule(ns, rulePath, "", mask, 0, policyHash)
-			continue
-		}
-
-		for _, src := range path.FromSource {
-			mon.updateBatchAuditPolicyRule(ns, rulePath, src.Path, mask, 0, policyHash)
-		}
+		mon.updateBatchAuditPolicyRuleFromSources(ns, rulePath, path.FromSource, mask, 0, policyHash)
 	}
 
 	for _, dir := range spec.Process.MatchDirectories {
@@ -296,14 +323,7 @@ func (mon *SystemMonitor) applyBatchAuditPolicySpec(ns NsKey, spec batchAuditPol
 		}
 
 		ruleDir := normalizeBatchAuditDir(dir.Directory)
-		if len(dir.FromSource) == 0 {
-			mon.updateBatchAuditPolicyRule(ns, ruleDir, "", mask, 0, policyHash)
-			continue
-		}
-
-		for _, src := range dir.FromSource {
-			mon.updateBatchAuditPolicyRule(ns, ruleDir, src.Path, mask, 0, policyHash)
-		}
+		mon.updateBatchAuditPolicyRuleFromSources(ns, ruleDir, dir.FromSource, mask, 0, policyHash)
 	}
 
 	for _, path := range spec.File.MatchPaths {
@@ -315,14 +335,7 @@ func (mon *SystemMonitor) applyBatchAuditPolicySpec(ns NsKey, spec batchAuditPol
 			mask |= batchAuditRuleOwner
 		}
 
-		if len(path.FromSource) == 0 {
-			mon.updateBatchAuditPolicyRule(ns, path.Path, "", 0, mask, policyHash)
-			continue
-		}
-
-		for _, src := range path.FromSource {
-			mon.updateBatchAuditPolicyRule(ns, path.Path, src.Path, 0, mask, policyHash)
-		}
+		mon.updateBatchAuditPolicyRuleFromSources(ns, path.Path, path.FromSource, 0, mask, policyHash)
 	}
 
 	for _, dir := range spec.File.MatchDirectories {
@@ -338,14 +351,7 @@ func (mon *SystemMonitor) applyBatchAuditPolicySpec(ns NsKey, spec batchAuditPol
 		}
 
 		ruleDir := normalizeBatchAuditDir(dir.Directory)
-		if len(dir.FromSource) == 0 {
-			mon.updateBatchAuditPolicyRule(ns, ruleDir, "", 0, mask, policyHash)
-			continue
-		}
-
-		for _, src := range dir.FromSource {
-			mon.updateBatchAuditPolicyRule(ns, ruleDir, src.Path, 0, mask, policyHash)
-		}
+		mon.updateBatchAuditPolicyRuleFromSources(ns, ruleDir, dir.FromSource, 0, mask, policyHash)
 	}
 }
 
@@ -409,6 +415,7 @@ func (mon *SystemMonitor) UpdateBatchAuditPoliciesForEndpoint(endPoint tp.EndPoi
 	mon.BpfMapLock.Unlock()
 
 	mon.syncBatchAuditMetadataWithMap()
+	mon.notifyBatchAuditRefresh()
 	return nil
 }
 
@@ -423,6 +430,7 @@ func (mon *SystemMonitor) UpdateBatchAuditPoliciesForHost(secPolicies []tp.HostS
 	mon.BpfMapLock.Unlock()
 
 	mon.syncBatchAuditMetadataWithMap()
+	mon.notifyBatchAuditRefresh()
 	return nil
 }
 
@@ -448,6 +456,7 @@ func (mon *SystemMonitor) HandleBatchAuditPolicyDelete(secPolicy tp.SecurityPoli
 	mon.BatchAuditStateLock.Lock()
 	delete(mon.BatchAuditPolicies, policyHash)
 	mon.BatchAuditStateLock.Unlock()
+	mon.notifyBatchAuditRefresh()
 }
 
 func (mon *SystemMonitor) HandleBatchAuditHostPolicyDelete(secPolicy tp.HostSecurityPolicy) {
@@ -468,6 +477,7 @@ func (mon *SystemMonitor) HandleBatchAuditHostPolicyDelete(secPolicy tp.HostSecu
 	mon.BatchAuditStateLock.Lock()
 	delete(mon.BatchAuditPolicies, policyHash)
 	mon.BatchAuditStateLock.Unlock()
+	mon.notifyBatchAuditRefresh()
 }
 
 func (mon *SystemMonitor) minBatchAuditInterval() time.Duration {
@@ -787,6 +797,14 @@ func (mon *SystemMonitor) PollBatchAuditEvents() {
 
 		interval := mon.minBatchAuditInterval()
 		mon.pollBatchAuditMapOnce()
-		time.Sleep(interval)
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-timer.C:
+		case <-mon.BatchAuditWakeChan:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		}
 	}
 }
