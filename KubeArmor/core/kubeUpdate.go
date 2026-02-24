@@ -377,6 +377,14 @@ func (dm *KubeArmorDaemon) UpdateEndPointWithPod(action string, pod tp.K8sPod) {
 				}
 			}
 		}
+		if dm.SystemMonitor != nil {
+			for _, endpoint := range endpoints {
+				if err := dm.SystemMonitor.UpdateBatchAuditPoliciesForEndpoint(endpoint); err != nil {
+					dm.Logger.Warnf("Failed to update batch audit policies for endpoint %s/%s: %s",
+						endpoint.NamespaceName, endpoint.EndPointName, err)
+				}
+			}
+		}
 
 	} else if action == updateEvent {
 		newEndPoint := tp.EndPoint{}
@@ -559,6 +567,14 @@ func (dm *KubeArmorDaemon) UpdateEndPointWithPod(action string, pod tp.K8sPod) {
 						} else {
 							dm.Logger.Warnf("Policy cannot be enforced in untracked namespace %s", endpoint.NamespaceName)
 						}
+					}
+				}
+			}
+			if dm.SystemMonitor != nil {
+				for _, endpoint := range endpoints {
+					if err := dm.SystemMonitor.UpdateBatchAuditPoliciesForEndpoint(endpoint); err != nil {
+						dm.Logger.Warnf("Failed to update batch audit policies for endpoint %s/%s: %s",
+							endpoint.NamespaceName, endpoint.EndPointName, err)
 					}
 				}
 			}
