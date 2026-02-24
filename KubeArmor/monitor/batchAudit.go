@@ -132,6 +132,14 @@ func (mon *SystemMonitor) updateBatchAuditPolicyRule(ns NsKey, path, source stri
 	copyStringToArray(key.Paths.Path[:], path)
 	copyStringToArray(key.Paths.Source[:], source)
 
+	// process and file rules can share the same map key.
+	// Merge masks for the same policy to avoid one rule overwriting the other.
+	existing := batchAuditPolicyVal{}
+	if err := mon.BatchAuditPolicyMap.Lookup(key, &existing); err == nil && existing.PolicyHash == policyHash {
+		processMask |= existing.ProcessMask
+		fileMask |= existing.FileMask
+	}
+
 	val := batchAuditPolicyVal{
 		PolicyHash:  policyHash,
 		ProcessMask: processMask,
