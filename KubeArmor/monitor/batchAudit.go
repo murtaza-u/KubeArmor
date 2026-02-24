@@ -746,7 +746,7 @@ func (mon *SystemMonitor) emitBatchAuditAlert(key batchAuditAggregationKey, val 
 
 	log.Type = "MatchedPolicy"
 	log.Enforcer = "eBPF Monitor"
-	log.Action = "Audit"
+	log.Action = "BatchAudit"
 	if log.Result == "" {
 		log.Result = "Passed"
 	}
