@@ -18,7 +18,7 @@ import (
 
 const (
 	batchAuditMaxPathLen           = 200
-	batchAuditSampleSize           = 32768
+	batchAuditSampleSize           = 1024
 	batchAuditFallbackPollInterval = 60
 
 	batchAuditRuleExec      uint16 = 1 << 0

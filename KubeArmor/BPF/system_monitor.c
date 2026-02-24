@@ -76,6 +76,9 @@
 #define MAX_STR_ARR_ELEM 20
 #define MAX_LOOP_LIMIT 25
 #define MAX_PATH_LEN 200
+#define MAX_BATCH_AUDIT_BUFFER_SIZE 1024
+#define MAX_BATCH_AUDIT_POLICIES_ENTRIES 65536
+#define MAX_BATCH_AUDIT_AGGREGATED_ENTRIES 65536
 
 #define NONE_T 0UL
 #define INT_T 1UL
@@ -377,7 +380,7 @@ struct batch_audit_aggregation_val_t
     __u64 last_seen;
     __u32 entry_sample_size;
     __u32 ret_sample_size;
-    __u8 sample_data[MAX_BUFFER_SIZE];
+    __u8 sample_data[MAX_BATCH_AUDIT_BUFFER_SIZE];
 };
 
 struct
@@ -385,7 +388,7 @@ struct
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, struct batch_audit_policy_key_t);
     __type(value, struct batch_audit_policy_val_t);
-    __uint(max_entries, MAX_ENTRIES);
+    __uint(max_entries, MAX_BATCH_AUDIT_POLICIES_ENTRIES);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } batch_audit_policies SEC(".maps");
 
@@ -394,7 +397,7 @@ struct
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __type(key, struct batch_audit_aggregation_key_t);
     __type(value, struct batch_audit_aggregation_val_t);
-    __uint(max_entries, MAX_ENTRIES);
+    __uint(max_entries, MAX_BATCH_AUDIT_AGGREGATED_ENTRIES);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } batch_audit_aggregations SEC(".maps");
 
@@ -1372,7 +1375,7 @@ static __always_inline bool batch_audit_owner_match(__u32 uid, __u32 oid, __u16 
 
 static __always_inline bool batch_audit_read_u8_from_buffer(bufs_t *bufs_p, u32 off, u8 *v)
 {
-    if (!bufs_p || !v || off >= MAX_BUFFER_SIZE)
+    if (!bufs_p || !v || off >= MAX_BATCH_AUDIT_BUFFER_SIZE)
     {
         return false;
     }
@@ -1398,7 +1401,7 @@ static __always_inline bool batch_audit_get_path_from_buffer(bufs_t *bufs_p, u32
         return false;
     }
 
-    if (size <= sizeof(sys_context_t) || size > MAX_BUFFER_SIZE)
+    if (size <= sizeof(sys_context_t) || size > MAX_BATCH_AUDIT_BUFFER_SIZE)
     {
         return false;
     }
@@ -1408,7 +1411,7 @@ static __always_inline bool batch_audit_get_path_from_buffer(bufs_t *bufs_p, u32
 #pragma unroll
     for (int i = 0; i < 4; i++)
     {
-        if (off + sizeof(u8) > size || off + sizeof(u8) > MAX_BUFFER_SIZE)
+        if (off + sizeof(u8) > size || off + sizeof(u8) > MAX_BATCH_AUDIT_BUFFER_SIZE)
         {
             return false;
         }
@@ -1422,7 +1425,7 @@ static __always_inline bool batch_audit_get_path_from_buffer(bufs_t *bufs_p, u32
 
         if (type == STR_T)
         {
-            if (off + sizeof(int) > size || off + sizeof(int) > MAX_BUFFER_SIZE)
+            if (off + sizeof(int) > size || off + sizeof(int) > MAX_BATCH_AUDIT_BUFFER_SIZE)
             {
                 return false;
             }
@@ -1431,7 +1434,7 @@ static __always_inline bool batch_audit_get_path_from_buffer(bufs_t *bufs_p, u32
             bpf_probe_read(&str_sz, sizeof(str_sz), (void *)&bufs_p->buf[off]);
             off += sizeof(int);
 
-            if (str_sz <= 0 || off + str_sz > size || off + str_sz > MAX_BUFFER_SIZE)
+            if (str_sz <= 0 || off + str_sz > size || off + str_sz > MAX_BATCH_AUDIT_BUFFER_SIZE)
             {
                 return false;
             }
@@ -1444,7 +1447,7 @@ static __always_inline bool batch_audit_get_path_from_buffer(bufs_t *bufs_p, u32
             type == MOUNT_FLAG_T || type == UMOUNT_FLAG_T ||
             type == SOCK_DOM_T || type == SOCK_TYPE_T)
         {
-            if (off + sizeof(int) > size || off + sizeof(int) > MAX_BUFFER_SIZE)
+            if (off + sizeof(int) > size || off + sizeof(int) > MAX_BATCH_AUDIT_BUFFER_SIZE)
             {
                 return false;
             }
@@ -1477,7 +1480,7 @@ static __always_inline bool batch_audit_get_open_flags_from_buffer(u32 id, bufs_
         return false;
     }
 
-    if (size <= sizeof(sys_context_t) || size > MAX_BUFFER_SIZE)
+    if (size <= sizeof(sys_context_t) || size > MAX_BATCH_AUDIT_BUFFER_SIZE)
     {
         return false;
     }
@@ -1491,7 +1494,7 @@ static __always_inline bool batch_audit_get_open_flags_from_buffer(u32 id, bufs_
 
     if (id == _SYS_OPENAT)
     {
-        if (off + sizeof(u8) + sizeof(int) > size || off + sizeof(u8) + sizeof(int) > MAX_BUFFER_SIZE)
+        if (off + sizeof(u8) + sizeof(int) > size || off + sizeof(u8) + sizeof(int) > MAX_BATCH_AUDIT_BUFFER_SIZE)
         {
             return false;
         }
@@ -1507,7 +1510,7 @@ static __always_inline bool batch_audit_get_open_flags_from_buffer(u32 id, bufs_
         off += sizeof(u8) + sizeof(int);
     }
 
-    if (off + sizeof(u8) + sizeof(int) > size || off + sizeof(u8) + sizeof(int) > MAX_BUFFER_SIZE)
+    if (off + sizeof(u8) + sizeof(int) > size || off + sizeof(u8) + sizeof(int) > MAX_BATCH_AUDIT_BUFFER_SIZE)
     {
         return false;
     }
@@ -1526,13 +1529,13 @@ static __always_inline bool batch_audit_get_open_flags_from_buffer(u32 id, bufs_
     bpf_probe_read(&str_sz, sizeof(str_sz), (void *)&bufs_p->buf[off]);
     off += sizeof(int);
 
-    if (str_sz <= 0 || off + str_sz > size || off + str_sz > MAX_BUFFER_SIZE)
+    if (str_sz <= 0 || off + str_sz > size || off + str_sz > MAX_BATCH_AUDIT_BUFFER_SIZE)
     {
         return false;
     }
     off += str_sz;
 
-    if (off + sizeof(u8) + sizeof(int) > size || off + sizeof(u8) + sizeof(int) > MAX_BUFFER_SIZE)
+    if (off + sizeof(u8) + sizeof(int) > size || off + sizeof(u8) + sizeof(int) > MAX_BATCH_AUDIT_BUFFER_SIZE)
     {
         return false;
     }
@@ -1780,7 +1783,7 @@ static __always_inline bool batch_audit_match_file(struct outer_key *okey, const
 static __always_inline void batch_audit_aggregate(__u64 policy_hash, __u64 event_hash, const void *entry_sample, __u32 entry_sample_size, const void *ret_sample, __u32 ret_sample_size)
 {
     // making the verifier happy
-    const __u32 max_seg = MAX_BUFFER_SIZE / 2;
+    const __u32 max_seg = MAX_BATCH_AUDIT_BUFFER_SIZE / 2;
     if (entry_sample_size > max_seg)
     {
         entry_sample_size = max_seg;
@@ -1789,9 +1792,9 @@ static __always_inline void batch_audit_aggregate(__u64 policy_hash, __u64 event
     {
         ret_sample_size = max_seg;
     }
-    if (entry_sample_size + ret_sample_size > MAX_BUFFER_SIZE)
+    if (entry_sample_size + ret_sample_size > MAX_BATCH_AUDIT_BUFFER_SIZE)
     {
-        ret_sample_size = MAX_BUFFER_SIZE - entry_sample_size;
+        ret_sample_size = MAX_BATCH_AUDIT_BUFFER_SIZE - entry_sample_size;
     }
 
     struct batch_audit_aggregation_key_t key = {
