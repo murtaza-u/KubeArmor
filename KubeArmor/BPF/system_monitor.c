@@ -77,7 +77,12 @@
 #define MAX_LOOP_LIMIT 25
 #define MAX_PATH_LEN 200
 #define MAX_BATCH_AUDIT_BUFFER_SIZE 1024
-#define MAX_BATCH_AUDIT_POLICIES_ENTRIES 65536
+
+// Memory utilization scale with the no. of entries. Finding a right balance is
+// hard as no two clusters are the same.
+// TODO: use sed magic in kubearmor-init container to change these values based
+// on the configuration provided in KubeArmorConfig CR.
+#define MAX_BATCH_AUDIT_POLICIES_ENTRIES 32768
 #define MAX_BATCH_AUDIT_AGGREGATED_ENTRIES 65536
 
 #define NONE_T 0UL
@@ -408,6 +413,48 @@ BPF_ARRAY(batch_audit_aggregation_val_scratch, struct batch_audit_aggregation_va
 
 BPF_LRU_HASH(batch_audit_pid_to_exec_size, u32, u32);
 BPF_LRU_HASH(batch_audit_pid_to_exec_data, u32, struct buffers);
+
+enum
+{
+    EXECVE_RET_STAGE_MATCH_SOURCE = 0,
+    EXECVE_RET_STAGE_MATCH_NOSOURCE = 1,
+    EXECVE_RET_STAGE_AGGREGATE_SUBMIT = 2,
+};
+
+struct exec_ret_tail_state_t
+{
+    struct outer_key okey;
+    __u64 policy_hash;
+    __u32 uid;
+    __u32 oid;
+    __s64 retval;
+    __u8 drop_event;
+    __u8 matched;
+    __u8 has_source;
+    char path[MAX_PATH_LEN];
+    char source[MAX_PATH_LEN];
+};
+
+BPF_HASH(exec_ret_tail_state, u32, struct exec_ret_tail_state_t);
+BPF_PERCPU_ARRAY(exec_ret_tail_state_scratch, struct exec_ret_tail_state_t, 1);
+BPF_PROG_ARRAY(exec_ret_tailcalls, 3);
+
+enum
+{
+    TRACE_RET_STAGE_FILE_AGGREGATE = 0,
+    TRACE_RET_STAGE_SUBMIT = 1,
+};
+
+struct trace_ret_tail_state_t
+{
+    __u32 id;
+    __u8 drop_event;
+    __u8 is_file_scope;
+};
+
+BPF_HASH(trace_ret_tail_state, u64, struct trace_ret_tail_state_t);
+BPF_PERCPU_ARRAY(trace_ret_tail_state_scratch, struct trace_ret_tail_state_t, 1);
+BPF_PROG_ARRAY(trace_ret_tailcalls, 2);
 
 // == Pid NS Management == //
 
@@ -2209,24 +2256,51 @@ int kprobe__execve(struct pt_regs *ctx)
     return 0;
 }
 
-SEC("kretprobe/__x64_sys_execve")
-int kretprobe__execve(struct pt_regs *ctx)
+static __always_inline bool exec_ret_should_drop_event(s64 retval)
 {
-    if (skip_syscall())
-        return 0;
-
-    sys_context_t context = {};
-    bool drop_event = false;
     bool should_drop_scope = drop_syscall(_PROCESS_PROBE);
 
+    // keep denied events for apparmor enforcer and drop passed logs in dropped
+    // scopes.
     if (get_kubearmor_config(_ENFORCER_BPFLSM) && should_drop_scope)
     {
-        drop_event = true;
+        return true;
     }
 
+    // we need alerts for apparmor enforcer hence only dropping passed logs.
+    if (retval >= 0 && should_drop_scope)
+    {
+        return true;
+    }
+
+    return false;
+}
+
+static __always_inline int exec_ret_cleanup_and_submit(struct pt_regs *ctx, u32 pid, bool drop_event)
+{
+    bpf_map_delete_elem(&batch_audit_pid_to_exec_size, &pid);
+    bpf_map_delete_elem(&batch_audit_pid_to_exec_data, &pid);
+    bpf_map_delete_elem(&exec_ret_tail_state, &pid);
+
+    if (!drop_event)
+    {
+        events_perf_submit(ctx, DATA_BUF_TYPE);
+    }
+
+    return 0;
+}
+
+static __always_inline int exec_ret_entry_prep(struct pt_regs *ctx, u32 event_id, u32 next_stage)
+{
+    if (skip_syscall())
+    {
+        return 0;
+    }
+
+    sys_context_t context = {};
     init_context(&context);
 
-    context.event_id = _SYS_EXECVE;
+    context.event_id = event_id;
     context.argnum = 0;
     context.retval = PT_REGS_RC(ctx);
 
@@ -2240,13 +2314,9 @@ int kretprobe__execve(struct pt_regs *ctx)
         return 0;
     }
 
-    if (context.retval >= 0 && should_drop_scope)
-    {
-        // we need alerts for apparmor enforcer hence only dropping passed logs
-        drop_event = true;
-    }
+    bool drop_event = exec_ret_should_drop_event(context.retval);
 
-    u32 types;
+    u32 types = 0;
     args_t args = {};
     if (context.retval < 0 && !get_kubearmor_config(_ENFORCER_BPFLSM) && get_kubearmor_config(_ALERT_THROTTLING) && should_drop_alerts_per_container(&context, ctx, types, &args))
     {
@@ -2256,8 +2326,10 @@ int kretprobe__execve(struct pt_regs *ctx)
     set_buffer_offset(DATA_BUF_TYPE, sizeof(sys_context_t));
 
     bufs_t *bufs_p = get_buffer(DATA_BUF_TYPE);
-    if (bufs_p == NULL)
+    if (!bufs_p)
+    {
         return 0;
+    }
 
     save_context_to_buffer(bufs_p, (void *)&context);
     save_all_hashes_to_the_buffer(bufs_p, false);
@@ -2265,79 +2337,160 @@ int kretprobe__execve(struct pt_regs *ctx)
     u32 pid = bpf_get_current_pid_tgid() >> 32;
     u32 *entry_size = bpf_map_lookup_elem(&batch_audit_pid_to_exec_size, &pid);
     bufs_t *entry_buf = bpf_map_lookup_elem(&batch_audit_pid_to_exec_data, &pid);
-    if (entry_size && entry_buf)
+    if (!entry_size || !entry_buf)
     {
-        struct outer_key okey = {};
-        struct task_struct *t = (struct task_struct *)bpf_get_current_task();
-        get_outer_key(&okey, t);
+        return exec_ret_cleanup_and_submit(ctx, pid, drop_event);
+    }
 
-        __u32 oid = 0;
-        struct file *file_p = get_task_file(t);
-        if (file_p)
-        {
-            struct inode *ino = READ_KERN(file_p -> f_inode);
-            kuid_t owner = READ_KERN(ino->i_uid);
-            oid = owner.val;
-        }
+    u32 idx = 0;
+    struct exec_ret_tail_state_t *state = bpf_map_lookup_elem(&exec_ret_tail_state_scratch, &idx);
+    if (!state)
+    {
+        return exec_ret_cleanup_and_submit(ctx, pid, drop_event);
+    }
 
-        u32 idx = 0;
-        struct batch_audit_paths_t *paths = bpf_map_lookup_elem(&batch_audit_exec_path_source_scratch, &idx);
-        if (!paths)
-        {
-            goto cleanup;
-        }
-        paths->path[0] = '\0';
-        paths->source[0] = '\0';
+    __builtin_memset(state, 0, sizeof(*state));
 
-        if (!batch_audit_get_path_from_buffer(entry_buf, *entry_size, paths->path, sizeof(paths->path)))
-        {
-            goto cleanup;
-        }
+    struct task_struct *t = (struct task_struct *)bpf_get_current_task();
+    get_outer_key(&state->okey, t);
 
-        struct task_struct *parent = READ_KERN(t->real_parent);
-        struct file *parent_file = get_task_file(parent);
-        if (parent_file && !read_file_path(parent_file, paths->source, sizeof(paths->source)))
-        {
-            paths->source[0] = '\0';
-        }
+    state->uid = context.uid;
+    state->retval = context.retval;
+    state->drop_event = drop_event ? 1 : 0;
 
-        __u64 policy_hash = 0;
-        bool matched = batch_audit_match_process(&okey, paths->path, paths->source, context.uid, oid, &policy_hash);
-        if (!matched && paths->source[0])
-        {
-            matched = batch_audit_match_process(&okey, paths->path, NULL, context.uid, oid, &policy_hash);
-        }
-        if (matched)
+    struct file *file_p = get_task_file(t);
+    if (file_p)
+    {
+        struct inode *ino = READ_KERN(file_p->f_inode);
+        kuid_t owner = READ_KERN(ino->i_uid);
+        state->oid = owner.val;
+    }
+
+    if (!batch_audit_get_path_from_buffer(entry_buf, *entry_size, state->path, sizeof(state->path)))
+    {
+        return exec_ret_cleanup_and_submit(ctx, pid, drop_event);
+    }
+
+    struct task_struct *parent = READ_KERN(t->real_parent);
+    struct file *parent_file = get_task_file(parent);
+    if (parent_file && !read_file_path(parent_file, state->source, sizeof(state->source)))
+    {
+        state->source[0] = '\0';
+    }
+    state->has_source = state->source[0] ? 1 : 0;
+
+    if (bpf_map_update_elem(&exec_ret_tail_state, &pid, state, BPF_ANY) != 0)
+    {
+        return exec_ret_cleanup_and_submit(ctx, pid, drop_event);
+    }
+    bpf_tail_call(ctx, &exec_ret_tailcalls, next_stage);
+
+    return exec_ret_cleanup_and_submit(ctx, pid, drop_event);
+}
+
+static __always_inline int exec_ret_match_source_stage(struct pt_regs *ctx, u32 next_on_nomatch, u32 next_on_done)
+{
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct exec_ret_tail_state_t *state = bpf_map_lookup_elem(&exec_ret_tail_state, &pid);
+    if (!state)
+    {
+        return exec_ret_cleanup_and_submit(ctx, pid, exec_ret_should_drop_event(PT_REGS_RC(ctx)));
+    }
+
+    __u64 policy_hash = 0;
+    state->matched = batch_audit_match_process(&state->okey, state->path, state->source, state->uid, state->oid, &policy_hash) ? 1 : 0;
+    if (state->matched)
+    {
+        state->policy_hash = policy_hash;
+        bpf_tail_call(ctx, &exec_ret_tailcalls, next_on_done);
+        return exec_ret_cleanup_and_submit(ctx, pid, state->drop_event != 0);
+    }
+
+    if (!state->has_source)
+    {
+        bpf_tail_call(ctx, &exec_ret_tailcalls, next_on_done);
+        return exec_ret_cleanup_and_submit(ctx, pid, state->drop_event != 0);
+    }
+
+    bpf_tail_call(ctx, &exec_ret_tailcalls, next_on_nomatch);
+    return exec_ret_cleanup_and_submit(ctx, pid, state->drop_event != 0);
+}
+
+static __always_inline int exec_ret_match_nosource_stage(struct pt_regs *ctx, u32 next_on_done)
+{
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct exec_ret_tail_state_t *state = bpf_map_lookup_elem(&exec_ret_tail_state, &pid);
+    if (!state)
+    {
+        return exec_ret_cleanup_and_submit(ctx, pid, exec_ret_should_drop_event(PT_REGS_RC(ctx)));
+    }
+
+    __u64 policy_hash = 0;
+    state->matched = batch_audit_match_process(&state->okey, state->path, NULL, state->uid, state->oid, &policy_hash) ? 1 : 0;
+    if (state->matched)
+    {
+        state->policy_hash = policy_hash;
+    }
+
+    bpf_tail_call(ctx, &exec_ret_tailcalls, next_on_done);
+    return exec_ret_cleanup_and_submit(ctx, pid, state->drop_event != 0);
+}
+
+static __always_inline int exec_ret_aggregate_submit_stage(struct pt_regs *ctx)
+{
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct exec_ret_tail_state_t *state = bpf_map_lookup_elem(&exec_ret_tail_state, &pid);
+    if (!state)
+    {
+        return exec_ret_cleanup_and_submit(ctx, pid, exec_ret_should_drop_event(PT_REGS_RC(ctx)));
+    }
+
+    if (state->matched && state->policy_hash)
+    {
+        u32 *entry_size = bpf_map_lookup_elem(&batch_audit_pid_to_exec_size, &pid);
+        bufs_t *entry_buf = bpf_map_lookup_elem(&batch_audit_pid_to_exec_data, &pid);
+        u32 *off = get_buffer_offset(DATA_BUF_TYPE);
+        bufs_t *bufs_p = get_buffer(DATA_BUF_TYPE);
+        if (entry_size && entry_buf && off && bufs_p)
         {
             u64 hash = 0;
             char op = 'P';
             hash = fnv1a_hash_u8((u8)op, hash);
-            hash = fnv1a_hash64_str(paths->path, sizeof(paths->path), hash);
-            hash = fnv1a_hash_u32(okey.pid_ns, hash);
-            hash = fnv1a_hash_u32(okey.mnt_ns, hash);
-            hash = fnv1a_hash_u32(context.uid, hash);
-            hash = fnv1a_hash_u32(oid, hash);
-            hash = fnv1a_hash_s64(context.retval, hash);
-
-            u32 *off = get_buffer_offset(DATA_BUF_TYPE);
-            if (off)
-            {
-                u32 size = *off;
-                batch_audit_aggregate(policy_hash, hash, entry_buf->buf, *entry_size, bufs_p->buf, size);
-            }
+            hash = fnv1a_hash64_str(state->path, sizeof(state->path), hash);
+            hash = fnv1a_hash_u32(state->okey.pid_ns, hash);
+            hash = fnv1a_hash_u32(state->okey.mnt_ns, hash);
+            hash = fnv1a_hash_u32(state->uid, hash);
+            hash = fnv1a_hash_u32(state->oid, hash);
+            hash = fnv1a_hash_s64(state->retval, hash);
+            batch_audit_aggregate(state->policy_hash, hash, entry_buf->buf, *entry_size, bufs_p->buf, *off);
         }
-
-    cleanup:
-        bpf_map_delete_elem(&batch_audit_pid_to_exec_size, &pid);
-        bpf_map_delete_elem(&batch_audit_pid_to_exec_data, &pid);
     }
 
-    if (!drop_event)
-    {
-        events_perf_submit(ctx, DATA_BUF_TYPE);
-    }
+    return exec_ret_cleanup_and_submit(ctx, pid, state->drop_event != 0);
+}
 
-    return 0;
+SEC("kretprobe/__x64_sys_execve")
+int kretprobe__execve(struct pt_regs *ctx)
+{
+    return exec_ret_entry_prep(ctx, _SYS_EXECVE, EXECVE_RET_STAGE_MATCH_SOURCE);
+}
+
+SEC("kprobe/execve_ret_match_source")
+int kprobe__execve_ret_match_source(struct pt_regs *ctx)
+{
+    return exec_ret_match_source_stage(ctx, EXECVE_RET_STAGE_MATCH_NOSOURCE, EXECVE_RET_STAGE_AGGREGATE_SUBMIT);
+}
+
+SEC("kprobe/execve_ret_match_nosource")
+int kprobe__execve_ret_match_nosource(struct pt_regs *ctx)
+{
+    return exec_ret_match_nosource_stage(ctx, EXECVE_RET_STAGE_AGGREGATE_SUBMIT);
+}
+
+SEC("kprobe/execve_ret_aggregate_submit")
+int kprobe__execve_ret_aggregate_submit(struct pt_regs *ctx)
+{
+    return exec_ret_aggregate_submit_stage(ctx);
 }
 
 SEC("kprobe/__x64_sys_execveat")
@@ -2411,131 +2564,7 @@ int kprobe__execveat(struct pt_regs *ctx)
 SEC("kretprobe/__x64_sys_execveat")
 int kretprobe__execveat(struct pt_regs *ctx)
 {
-    if (skip_syscall())
-        return 0;
-
-    sys_context_t context = {};
-    bool drop_event = false;
-    bool should_drop_scope = drop_syscall(_PROCESS_PROBE);
-
-    if (get_kubearmor_config(_ENFORCER_BPFLSM) && should_drop_scope)
-    {
-        drop_event = true;
-    }
-
-    init_context(&context);
-
-    context.event_id = _SYS_EXECVEAT;
-    context.argnum = 0;
-    context.retval = PT_REGS_RC(ctx);
-    context.hash = 1;
-
-    // skip if No such file/directory or if there is an EINPROGRESS
-    // EINPROGRESS error, happens when the socket is non-blocking and the connection cannot be completed immediately.
-    if (context.retval == -2 || context.retval == -115)
-    {
-        return 0;
-    }
-
-    if (context.retval >= 0 && should_drop_scope)
-    {
-        // we need alerts for apparmor enforcer hence only dropping passed logs
-        drop_event = true;
-    }
-
-    u32 types;
-    args_t args = {};
-
-    if (context.retval < 0 && !get_kubearmor_config(_ENFORCER_BPFLSM) && get_kubearmor_config(_ALERT_THROTTLING) && should_drop_alerts_per_container(&context, ctx, types, &args))
-    {
-        return 0;
-    }
-
-    set_buffer_offset(DATA_BUF_TYPE, sizeof(sys_context_t));
-
-    bufs_t *bufs_p = get_buffer(DATA_BUF_TYPE);
-    if (bufs_p == NULL)
-        return 0;
-
-    save_context_to_buffer(bufs_p, (void *)&context);
-    save_all_hashes_to_the_buffer(bufs_p, false);
-
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    u32 *entry_size = bpf_map_lookup_elem(&batch_audit_pid_to_exec_size, &pid);
-    bufs_t *entry_buf = bpf_map_lookup_elem(&batch_audit_pid_to_exec_data, &pid);
-    if (entry_size && entry_buf)
-    {
-        struct outer_key okey = {};
-        struct task_struct *t = (struct task_struct *)bpf_get_current_task();
-        get_outer_key(&okey, t);
-
-        __u32 oid = 0;
-        struct file *file_p = get_task_file(t);
-        if (file_p)
-        {
-            struct inode *ino = READ_KERN(file_p -> f_inode);
-            kuid_t owner = READ_KERN(ino->i_uid);
-            oid = owner.val;
-        }
-
-        u32 idx = 0;
-        struct batch_audit_paths_t *paths = bpf_map_lookup_elem(&batch_audit_exec_path_source_scratch, &idx);
-        if (!paths)
-        {
-            goto cleanup;
-        }
-        paths->path[0] = '\0';
-        paths->source[0] = '\0';
-
-        if (!batch_audit_get_path_from_buffer(entry_buf, *entry_size, paths->path, sizeof(paths->path)))
-        {
-            goto cleanup;
-        }
-
-        struct task_struct *parent = READ_KERN(t->real_parent);
-        struct file *parent_file = get_task_file(parent);
-        if (parent_file && !read_file_path(parent_file, paths->source, sizeof(paths->source)))
-        {
-            paths->source[0] = '\0';
-        }
-
-        __u64 policy_hash = 0;
-        bool matched = batch_audit_match_process(&okey, paths->path, paths->source, context.uid, oid, &policy_hash);
-        if (!matched && paths->source[0])
-        {
-            matched = batch_audit_match_process(&okey, paths->path, NULL, context.uid, oid, &policy_hash);
-        }
-        if (matched)
-        {
-            u64 hash = 0;
-            char op = 'P';
-            hash = fnv1a_hash_u8((u8)op, hash);
-            hash = fnv1a_hash64_str(paths->path, sizeof(paths->path), hash);
-            hash = fnv1a_hash_u32(okey.pid_ns, hash);
-            hash = fnv1a_hash_u32(okey.mnt_ns, hash);
-            hash = fnv1a_hash_u32(context.uid, hash);
-            hash = fnv1a_hash_u32(oid, hash);
-            hash = fnv1a_hash_s64(context.retval, hash);
-
-            u32 *off = get_buffer_offset(DATA_BUF_TYPE);
-            if (off)
-            {
-                u32 size = *off;
-                batch_audit_aggregate(policy_hash, hash, entry_buf->buf, *entry_size, bufs_p->buf, size);
-            }
-        }
-
-    cleanup:
-        bpf_map_delete_elem(&batch_audit_pid_to_exec_size, &pid);
-        bpf_map_delete_elem(&batch_audit_pid_to_exec_data, &pid);
-    }
-
-    if (!drop_event)
-    {
-        events_perf_submit(ctx, DATA_BUF_TYPE);
-    }
-
-    return 0;
+    return exec_ret_entry_prep(ctx, _SYS_EXECVEAT, EXECVE_RET_STAGE_MATCH_SOURCE);
 }
 
 SEC("kprobe/do_exit")
@@ -2652,6 +2681,16 @@ static __always_inline int get_arg_num(u64 types)
     return argnum;
 }
 
+static __always_inline int trace_ret_cleanup_and_submit(struct pt_regs *ctx, u64 pid_tgid, bool drop_event)
+{
+    bpf_map_delete_elem(&trace_ret_tail_state, &pid_tgid);
+    if (!drop_event)
+    {
+        events_perf_submit(ctx, DATA_BUF_TYPE);
+    }
+    return 0;
+}
+
 static __always_inline int trace_ret_generic(u32 id, struct pt_regs *ctx, u64 types, u32 scope)
 {
     if (skip_syscall())
@@ -2729,20 +2768,77 @@ static __always_inline int trace_ret_generic(u32 id, struct pt_regs *ctx, u64 ty
 
     save_context_to_buffer(bufs_p, (void *)&context);
     save_args_to_buffer(types, &args);
+
+    u32 idx = 0;
+    struct trace_ret_tail_state_t *state = bpf_map_lookup_elem(&trace_ret_tail_state_scratch, &idx);
+    if (state == NULL)
+        return 0;
+
+    __builtin_memset(state, 0, sizeof(*state));
+    state->id = id;
+    state->drop_event = drop_event ? 1 : 0;
+    state->is_file_scope = (scope == _FILE_PROBE) ? 1 : 0;
+
+    if (bpf_map_update_elem(&trace_ret_tail_state, &pid_tgid, state, BPF_ANY) != 0)
+        return 0;
+
     if (scope == _FILE_PROBE)
     {
         save_all_hashes_to_the_buffer(bufs_p, true);
         u32 hash_id = context.host_pid | FILE_HASH_MASK;
         bpf_map_delete_elem(&kubearmor_ima_hash_map, &hash_id);
+        bpf_tail_call(ctx, &trace_ret_tailcalls, TRACE_RET_STAGE_FILE_AGGREGATE);
 
         struct task_struct *t = (struct task_struct *)bpf_get_current_task();
         batch_audit_file_aggregate(id, &context, bufs_p, t);
+        return trace_ret_cleanup_and_submit(ctx, pid_tgid, drop_event);
     }
-    if (!drop_event)
+
+    bpf_tail_call(ctx, &trace_ret_tailcalls, TRACE_RET_STAGE_SUBMIT);
+    return trace_ret_cleanup_and_submit(ctx, pid_tgid, drop_event);
+}
+
+SEC("kprobe/trace_ret_generic_file_aggregate")
+int kprobe__trace_ret_generic_file_aggregate(struct pt_regs *ctx)
+{
+    if (!ctx)
+        return 0;
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct trace_ret_tail_state_t *state = bpf_map_lookup_elem(&trace_ret_tail_state, &pid_tgid);
+    if (!state)
+        return 0;
+
+    if (state->is_file_scope)
     {
-        events_perf_submit(ctx, DATA_BUF_TYPE);
+        bufs_t *bufs_p = get_buffer(DATA_BUF_TYPE);
+        if (bufs_p)
+        {
+            sys_context_t *context = (sys_context_t *)bufs_p->buf;
+            if (context)
+            {
+                struct task_struct *t = (struct task_struct *)bpf_get_current_task();
+                batch_audit_file_aggregate(state->id, context, bufs_p, t);
+            }
+        }
     }
-    return 0;
+
+    bpf_tail_call(ctx, &trace_ret_tailcalls, TRACE_RET_STAGE_SUBMIT);
+    return trace_ret_cleanup_and_submit(ctx, pid_tgid, state->drop_event != 0);
+}
+
+SEC("kprobe/trace_ret_generic_submit")
+int kprobe__trace_ret_generic_submit(struct pt_regs *ctx)
+{
+    if (!ctx)
+        return 0;
+
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct trace_ret_tail_state_t *state = bpf_map_lookup_elem(&trace_ret_tail_state, &pid_tgid);
+    if (!state)
+        return 0;
+
+    return trace_ret_cleanup_and_submit(ctx, pid_tgid, state->drop_event != 0);
 }
 
 #define DIR_PROC "/proc/"

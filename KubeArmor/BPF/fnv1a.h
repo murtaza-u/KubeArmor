@@ -1,6 +1,20 @@
 #ifndef _FNV_1A_H
 #define _FNV_1A_H
 
+/* suppress clangd errors */
+#ifdef __clang__
+
+typedef unsigned char  u8;
+typedef unsigned int   u32;
+typedef unsigned long long u64;
+typedef long long s64;
+
+#ifndef __always_inline
+#define __always_inline inline __attribute__((always_inline))
+#endif
+
+#endif
+
 #define FNV_OFFSET_BASIS_64 0xcbf29ce484222325ULL
 #define FNV_PRIME_64 0x100000001b3ULL
 

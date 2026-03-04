@@ -394,7 +394,6 @@ func (dm *KubeArmorDaemon) UpdateEndPointWithPod(action string, pod tp.K8sPod) {
 		for _, endPoint := range dm.EndPoints {
 			if pod.Metadata["namespaceName"] == endPoint.NamespaceName && pod.Metadata["podName"] == endPoint.EndPointName {
 				endpoints = append(endpoints, endPoint)
-				break
 			}
 		}
 		dm.EndPointsLock.RUnlock()
